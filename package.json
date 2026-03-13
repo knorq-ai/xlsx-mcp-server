@@ -1,0 +1,54 @@
+{
+  "name": "xlsx-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for XLSX spreadsheet editing — read, write, format, and manage Excel workbooks",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "xlsx-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "xlsx",
+    "excel",
+    "exceljs",
+    "spreadsheet",
+    "model-context-protocol"
+  ],
+  "author": "xlsx-mcp-server contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/knorq-ai/xlsx-mcp-server.git"
+  },
+  "homepage": "https://github.com/knorq-ai/xlsx-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/knorq-ai/xlsx-mcp-server/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "exceljs": "^4.4.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.18"
+  }
+}
