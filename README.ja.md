@@ -1,5 +1,7 @@
 # xlsx-mcp-server
 
+[![CI](https://github.com/knorq-ai/xlsx-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/knorq-ai/xlsx-mcp-server/actions/workflows/ci.yml)
+
 Excel (.xlsx) ファイルの読み取り・編集を行うローカル [MCP](https://modelcontextprotocol.io/) サーバ。Claude Code、Cursor、その他 MCP 対応クライアントで動作する。
 
 セルデータ、書式設定、数式、シート管理、行列操作、データ入力規則、名前付き範囲、セル結合をカバーする **37 ツール** を提供。すべて stdio 経由でローカル実行され、ファイルのアップロードは不要である。

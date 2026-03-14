@@ -1,5 +1,7 @@
 # xlsx-mcp-server
 
+[![CI](https://github.com/knorq-ai/xlsx-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/knorq-ai/xlsx-mcp-server/actions/workflows/ci.yml)
+
 A local [MCP](https://modelcontextprotocol.io/) server for reading and editing Excel (.xlsx) files. Works with Claude Code, Cursor, and any MCP-compatible client.
 
 **37 tools** for cell data, formatting, formulas, sheet management, row/column operations, data validation, named ranges, and cell merging — all running locally via stdio with no file uploads.
