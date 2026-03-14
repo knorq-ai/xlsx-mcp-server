@@ -380,6 +380,23 @@ file_path, sheet, range
 - **Range size limit** — Write, format, and validation tools reject ranges exceeding 100,000 cells
 - **File size limit** — Files larger than 100 MB cannot be opened
 
+## Why MCP tools instead of raw Python?
+
+AI agents can manipulate Excel via raw Python (openpyxl), but MCP tools are significantly more token-efficient:
+
+| Metric | MCP tools | Raw Python |
+|--------|-----------|------------|
+| Output tokens per operation | **82–91% less** | Baseline (agent must generate full code) |
+| Cost per operation | **69–83% less** | Baseline |
+| Break-even | **2 operations** | — |
+| Debug iterations | None (validated inputs) | ~1.5 retries/task on average |
+
+The savings come primarily from **eliminating code generation** — output tokens cost 5× more than input tokens. MCP tool calls are small structured parameters (~50 tokens), while equivalent Python code requires ~300–600 output tokens per operation (imports, file handling, API calls, error handling).
+
+Formatting operations see the largest savings (83%) because openpyxl's styling API (`PatternFill`, `Border`, `Side`, `Font`) is particularly verbose.
+
+See [docs/token-efficiency-analysis.md](docs/token-efficiency-analysis.md) for detailed scenario breakdowns.
+
 ## Requirements
 
 - Node.js 18+
