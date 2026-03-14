@@ -388,14 +388,14 @@ AI agents can manipulate Excel via raw Python (openpyxl), but MCP tools are sign
 
 | Metric | MCP tools | Raw Python |
 |--------|-----------|------------|
-| Output tokens per operation | **82–91% less** | Baseline (agent must generate full code) |
-| Cost per operation | **69–83% less** | Baseline |
+| Output tokens per operation | **60–85% less** | Baseline (agent must generate full code) |
+| Cost per operation | **50–80% less** | Baseline |
 | Break-even | **2 operations** | — |
 | Debug iterations | None (validated inputs) | ~1.5 retries/task on average |
 
-The savings come primarily from **eliminating code generation** — output tokens cost 5× more than input tokens. MCP tool calls are small structured parameters (~50 tokens), while equivalent Python code requires ~300–600 output tokens per operation (imports, file handling, API calls, error handling).
+The savings come primarily from **eliminating code generation** — output tokens cost 5× more than input tokens. MCP tool calls are small structured parameters (~30–50 tokens), while equivalent Python code requires ~80–200 output tokens per operation (imports, style objects, iteration, save).
 
-Formatting operations see the largest savings (83%) because openpyxl's styling API (`PatternFill`, `Border`, `Side`, `Font`) is particularly verbose.
+Formatting operations see the largest savings (~75%) because openpyxl's styling API (`PatternFill`, `Border`, `Side`, `Font`) is particularly verbose. Simple cell read/write sees smaller but still meaningful savings (~60%).
 
 See [docs/token-efficiency-analysis.md](docs/token-efficiency-analysis.md) for detailed scenario breakdowns.
 
