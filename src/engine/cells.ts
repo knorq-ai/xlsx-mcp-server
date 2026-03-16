@@ -82,8 +82,8 @@ export function parseRange(range: string): CellRange {
   throw new EngineError(ErrorCode.INVALID_RANGE, `Invalid range: ${range}`);
 }
 
-/** 範囲サイズ上限 (100,000 セル) */
-const MAX_RANGE_CELLS = 100_000;
+/** 範囲・バルク操作のセル数上限 (100,000 セル) */
+export const MAX_RANGE_CELLS = 100_000;
 
 /**
  * 範囲のセル数が上限を超えていないか検証する。
@@ -275,7 +275,6 @@ export function readSheetData(
     endCol = parsed.endCol;
   }
 
-  // Collect merge ranges from worksheet internals
   // Collect merge ranges from worksheet internals.
   // ExcelJS stores merges as Range objects with .tl / .br getters.
   const merges = (ws as unknown as { _merges?: Record<string, { tl: string; br: string }> })._merges;

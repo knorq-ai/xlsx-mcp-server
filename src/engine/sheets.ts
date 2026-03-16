@@ -23,9 +23,13 @@ export function addWorksheet(
  * ワークシートの名前を変更する。
  */
 export function renameWorksheet(
+  workbook: ExcelJS.Workbook,
   ws: ExcelJS.Worksheet,
   newName: string,
 ): void {
+  if (workbook.getWorksheet(newName)) {
+    throw new EngineError(ErrorCode.DUPLICATE_NAME, `Sheet already exists: "${newName}"`);
+  }
   ws.name = newName;
 }
 

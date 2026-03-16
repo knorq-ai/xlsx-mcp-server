@@ -29,6 +29,7 @@ import {
   parseCellAddress,
   parseRange,
   validateRangeSize,
+  MAX_RANGE_CELLS,
   columnNumberToLetter,
   columnLetterToNumber,
   getCellData,
@@ -375,6 +376,12 @@ export async function writeCells(
   sheet: string | number,
   cells: Array<{ cell: string; value: string | number | boolean | null }>,
 ): Promise<string> {
+  if (cells.length > MAX_RANGE_CELLS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Too many cells (${cells.length.toLocaleString()}). Maximum is ${MAX_RANGE_CELLS.toLocaleString()}.`,
+    );
+  }
   return withFileLock(filePath, async () => {
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
@@ -417,6 +424,13 @@ export async function writeRows(
   rows: Array<Array<string | number | boolean | null>>,
   startColumn?: string,
 ): Promise<string> {
+  const totalCells = rows.reduce((sum, row) => sum + row.length, 0);
+  if (totalCells > MAX_RANGE_CELLS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Too many cells (${totalCells.toLocaleString()}). Maximum is ${MAX_RANGE_CELLS.toLocaleString()}.`,
+    );
+  }
   return withFileLock(filePath, async () => {
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
@@ -490,13 +504,25 @@ export async function formatCellsBulk(
   sheet: string | number,
   groups: CellFormatBulkGroup[],
 ): Promise<string> {
+  // 各グループの個別検証 + 累計セル数の検証をロック取得前に行う
+  let cumulativeCells = 0;
+  for (const group of groups) {
+    const parsed = parseRange(group.range);
+    validateRangeSize(parsed);
+    cumulativeCells += (parsed.endRow - parsed.startRow + 1) * (parsed.endCol - parsed.startCol + 1);
+  }
+  if (cumulativeCells > MAX_RANGE_CELLS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Total cells across all groups too large (${cumulativeCells.toLocaleString()}). Maximum is ${MAX_RANGE_CELLS.toLocaleString()}.`,
+    );
+  }
   return withFileLock(filePath, async () => {
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
     let totalCount = 0;
     for (const group of groups) {
       const parsed = parseRange(group.range);
-      validateRangeSize(parsed);
       for (let r = parsed.startRow; r <= parsed.endRow; r++) {
         const row = ws.getRow(r);
         for (let c = parsed.startCol; c <= parsed.endCol; c++) {
@@ -535,7 +561,7 @@ export async function renameSheet(
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
     const oldName = ws.name;
-    renameWorksheet(ws, newName);
+    renameWorksheet(handle.workbook, ws, newName);
     await saveXlsx(handle);
     return `Renamed sheet "${oldName}" → "${newName}"`;
   });

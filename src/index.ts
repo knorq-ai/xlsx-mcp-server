@@ -274,7 +274,7 @@ server.tool(
     cells: z.array(z.object({
       cell: cellAddressSchema,
       value: cellValueSchema.describe("Value to set"),
-    })).describe("Array of cell edits"),
+    })).max(100000).describe("Array of cell edits (max 100,000)"),
   },
   async ({ file_path, sheet, cells }) => {
     try {
@@ -293,7 +293,7 @@ server.tool(
     file_path: filePathSchema,
     sheet: sheetSchema,
     row: rowSchema,
-    values: z.array(cellValueSchema).describe("Array of values to write"),
+    values: z.array(cellValueSchema).max(16384).describe("Array of values to write (max 16,384 — Excel column limit)"),
     start_column: columnSchema.optional().describe("Start column letter (default 'A')"),
   },
   async ({ file_path, sheet, row, values, start_column }) => {
@@ -313,7 +313,7 @@ server.tool(
     file_path: filePathSchema,
     sheet: sheetSchema,
     start_row: rowSchema.describe("Starting row number (1-based)"),
-    rows: z.array(z.array(cellValueSchema)).describe("2D array of values: [[row1...], [row2...], ...]"),
+    rows: z.array(z.array(cellValueSchema)).max(100000).describe("2D array of values: [[row1...], [row2...], ...] (max 100,000 rows)"),
     start_column: columnSchema.optional().describe("Start column letter (default 'A')"),
   },
   async ({ file_path, sheet, start_row, rows, start_column }) => {
@@ -399,7 +399,7 @@ server.tool(
     groups: z.array(z.object({
       range: z.string().describe("Cell range"),
       format: formatOptionsSchema.describe("Format options"),
-    })).describe("Array of range-format groups"),
+    })).max(1000).describe("Array of range-format groups (max 1,000)"),
   },
   async ({ file_path, sheet, groups }) => {
     try {
