@@ -13,7 +13,7 @@ import ExcelJS from "exceljs";
 // Re-export types and helpers
 export { ErrorCode, EngineError } from "./engine/xlsx-io.js";
 export type { ErrorCodeType } from "./engine/xlsx-io.js";
-export type { CellData, SheetData, RowData, SearchMatch, CellRange } from "./engine/cells.js";
+export type { CellData, SheetData, RowData, SearchMatch, CellRange, ReadSheetOptions } from "./engine/cells.js";
 export type { CellFormatOptions, CellFormatBulkGroup } from "./engine/formatting.js";
 export type { ImageInfo } from "./engine/images.js";
 
@@ -119,10 +119,11 @@ export async function readSheet(
   filePath: string,
   sheet: string | number,
   range?: string,
+  compact?: boolean,
 ): Promise<string> {
   const handle = await openXlsx(filePath);
   const ws = resolveSheet(handle.workbook, sheet);
-  const data = readSheetData(ws, range);
+  const data = readSheetData(ws, { range, compact });
 
   const lines: string[] = [];
   lines.push(`Sheet: "${data.sheetName}" | Range: ${data.range}`);

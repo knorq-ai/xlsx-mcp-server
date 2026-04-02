@@ -173,9 +173,10 @@ describe("merged cell info", () => {
     const a1 = json.data[0].cells.find((c: { address: string }) => c.address === "A1");
     expect(a1.mergeRange).toBe("A1:C1");
 
-    // Non-master cell (B1) should have mergedWith
+    // Non-master cell (B1) should have mergedWith but no duplicated value
     const b1 = json.data[0].cells.find((c: { address: string }) => c.address === "B1");
     expect(b1.mergedWith).toBe("A1");
+    expect(b1.value).toBeNull();
   });
 
   it("read_cell shows merge info for master cell", async () => {
@@ -200,5 +201,78 @@ describe("merged cell info", () => {
 
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
     expect(json.mergedWith).toBe("A1");
+  });
+
+  it("merged children do not duplicate the master cell value", async () => {
+    const p = await createTmpWorkbook();
+    await writeCell(p, 1, "A1", "Long repeated value");
+    await mergeCells(p, 1, "A1:E1");
+
+    const result = await readSheet(p, 1);
+    const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
+
+    const a1 = json.data[0].cells.find((c: { address: string }) => c.address === "A1");
+    expect(a1.value).toBe("Long repeated value");
+    expect(a1.mergeRange).toBe("A1:E1");
+
+    for (const addr of ["B1", "C1", "D1", "E1"]) {
+      const cell = json.data[0].cells.find((c: { address: string }) => c.address === addr);
+      expect(cell.value).toBeNull();
+      expect(cell.mergedWith).toBe("A1");
+    }
+  });
+});
+
+describe("compact output mode", () => {
+  it("omits merged children in compact mode", async () => {
+    const p = await createTmpWorkbook();
+    await writeCell(p, 1, "A1", "Header");
+    await writeCell(p, 1, "D1", "Other");
+    await mergeCells(p, 1, "A1:C1");
+
+    const result = await readSheet(p, 1, undefined, true);
+    const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
+
+    const addresses = json.data[0].cells.map((c: { address: string }) => c.address);
+    expect(addresses).toContain("A1");
+    expect(addresses).toContain("D1");
+    expect(addresses).not.toContain("B1");
+    expect(addresses).not.toContain("C1");
+    expect(json.compact).toBe(true);
+  });
+
+  it("omits null/empty cells in compact mode", async () => {
+    const p = await createTmpWorkbook();
+    await writeRows(p, 1, 1, [
+      ["A", null, "C", null],
+      [null, null, null, null],
+      ["D", null, null, "E"],
+    ]);
+
+    const result = await readSheet(p, 1, "A1:D3", true);
+    const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
+
+    // Row 2 (all null) should be omitted
+    const rowNumbers = json.data.map((r: { row: number }) => r.row);
+    expect(rowNumbers).not.toContain(2);
+
+    // Row 1 should only have A1 and C1
+    const row1 = json.data.find((r: { row: number }) => r.row === 1);
+    const row1Addrs = row1.cells.map((c: { address: string }) => c.address);
+    expect(row1Addrs).toEqual(["A1", "C1"]);
+  });
+
+  it("compact=false (default) includes all cells", async () => {
+    const p = await createTmpWorkbook();
+    await writeCell(p, 1, "A1", "Header");
+    await mergeCells(p, 1, "A1:C1");
+
+    const result = await readSheet(p, 1);
+    const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
+
+    const addresses = json.data[0].cells.map((c: { address: string }) => c.address);
+    expect(addresses).toContain("B1");
+    expect(addresses).toContain("C1");
+    expect(json.compact).toBeUndefined();
   });
 });
