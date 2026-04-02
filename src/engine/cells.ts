@@ -134,8 +134,9 @@ export function getCellData(cell: ExcelJS.Cell): CellData {
   if (cell.isMerged) {
     const master = cell.master;
     if (master.address !== cell.address) {
-      // This cell is a non-master part of a merge
+      // Non-master part of a merge — return reference only, no duplicated value
       result.mergedWith = master.address;
+      return result;
     }
     // mergeRange for master cells is set in readSheetData (needs worksheet._merges)
   }
@@ -245,6 +246,8 @@ export interface SheetData {
   data: RowData[];
   /** All merged cell ranges in the sheet (e.g. ["A1:C1", "D5:D10"]) */
   mergedCells?: string[];
+  /** True when compact mode was used (merged children and empty cells omitted) */
+  compact?: boolean;
 }
 
 export interface RowData {
@@ -252,13 +255,22 @@ export interface RowData {
   cells: CellData[];
 }
 
+export interface ReadSheetOptions {
+  range?: string;
+  /** Compact mode: omit merged children and empty cells to reduce output size */
+  compact?: boolean;
+}
+
 /**
- * シートからデータを読み取る。range 指定可。
+ * シートからデータを読み取る。range / compact 指定可。
  */
 export function readSheetData(
   ws: ExcelJS.Worksheet,
-  range?: string,
+  options?: ReadSheetOptions,
 ): SheetData {
+  const range = options?.range;
+  const compact = options?.compact ?? false;
+
   const actualRowCount = ws.rowCount;
   const actualColCount = ws.columnCount;
 
@@ -308,11 +320,20 @@ export function readSheetData(
       if (mr) {
         cd.mergeRange = mr;
       }
+
+      // Compact mode: skip merged children and empty non-anchor cells
+      if (compact) {
+        if (cd.mergedWith) continue;
+        if (cd.value === null && !cd.mergeRange) continue;
+      }
+
       cells.push(cd);
     }
 
-    // 空行をスキップ（range 指定時は含める）
-    if (hasValue || range) {
+    // 空行をスキップ（range 指定時は含める。compact 時は空行を常にスキップ）
+    if (compact) {
+      if (cells.length > 0) data.push({ row: r, cells });
+    } else if (hasValue || range) {
       data.push({ row: r, cells });
     }
   }
@@ -330,6 +351,9 @@ export function readSheetData(
   };
   if (mergedCells.length > 0) {
     result.mergedCells = mergedCells;
+  }
+  if (compact) {
+    result.compact = true;
   }
   return result;
 }

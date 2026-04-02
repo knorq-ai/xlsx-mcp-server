@@ -73,6 +73,7 @@ npx vitest run    # 全テスト実行
 | パラメータ | デフォルト値 | 備考 |
 |---|---|---|
 | `case_sensitive` | `false` | 検索時の大文字小文字区別 |
+| `compact` | `false` | `read_sheet` のコンパクトモード。結合セルの子とnullセルを省略 |
 | シート指定省略 | — | `search_cells` のみ全シート検索 |
 
 ## パラメータ規約
@@ -86,6 +87,10 @@ npx vitest run    # 全テスト実行
 ## 構造化レスポンス
 
 `get_workbook_info`, `read_sheet`, `read_cell`, `search_cells`, `list_named_ranges`, `list_data_validations`, `list_images`, `get_sheet_properties` はテキストの後に `<json>...</json>` ブロックで構造化データを返す。LLM はテキスト部分で自然言語応答を構成し、プログラムは JSON 部分をパースして利用できる。
+
+### 結合セルの値
+
+`read_sheet` / `read_cell` の結合セル: マスターセルのみが値を持ち、子セルは `mergedWith` 参照のみを返す（値は `null`）。`compact: true` を指定すると、子セルと空セルが出力から完全に省略される。
 
 ## 書き込みロック
 

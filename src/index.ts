@@ -122,15 +122,16 @@ server.tool(
 
 server.tool(
   "read_sheet",
-  "Read cell data from a sheet (values, formulas, types). Optionally specify a range like 'A1:C10'.",
+  "Read cell data from a sheet (values, formulas, types). Optionally specify a range like 'A1:C10'. Use compact=true to omit empty cells and merged-cell children for token-efficient output.",
   {
     file_path: filePathSchema,
     sheet: sheetSchema,
     range: z.string().optional().describe("Cell range to read (e.g. 'A1:C10'). Omit to read all data."),
+    compact: z.boolean().optional().default(false).describe("Omit empty cells and merged-cell children. Reduces output for sheets with many merged cells."),
   },
-  async ({ file_path, sheet, range }) => {
+  async ({ file_path, sheet, range, compact }) => {
     try {
-      const result = await readSheet(file_path, sheet, range);
+      const result = await readSheet(file_path, sheet, range, compact);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
