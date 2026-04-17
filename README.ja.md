@@ -39,7 +39,7 @@ write_cells →  cells: [{cell: "B1", value: "=A1*2"}, {cell: "B2", value: "=VLO
 ### 方法 1: npm からインストール
 
 ```bash
-npm install -g @llamadrive/xlsx-mcp-server
+npm install -g @knorq/xlsx-mcp-server
 ```
 
 インストール後、MCP 設定に追加する（下記 [設定](#設定) を参照）。
@@ -53,7 +53,7 @@ npm install -g @llamadrive/xlsx-mcp-server
   "mcpServers": {
     "xlsx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/xlsx-mcp-server"]
+      "args": ["-y", "@knorq/xlsx-mcp-server"]
     }
   }
 }
@@ -80,7 +80,7 @@ npm link        # `xlsx-mcp-server` をグローバルで利用可能にする
   "mcpServers": {
     "xlsx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/xlsx-mcp-server"]
+      "args": ["-y", "@knorq/xlsx-mcp-server"]
     }
   }
 }
@@ -95,7 +95,7 @@ Cursor 設定の MCP サーバ構成に追加:
   "mcpServers": {
     "xlsx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/xlsx-mcp-server"]
+      "args": ["-y", "@knorq/xlsx-mcp-server"]
     }
   }
 }
@@ -139,7 +139,7 @@ npm publish
 受け取り側は以下でインストール:
 
 ```bash
-npm install -g @llamadrive/xlsx-mcp-server
+npm install -g @knorq/xlsx-mcp-server
 ```
 
 インストールを省略することも可能 — 上記の `npx` 設定を含む `.mcp.json` を共有するだけで動作する。

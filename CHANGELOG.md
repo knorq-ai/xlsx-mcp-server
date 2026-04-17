@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.0] — 2026-04-17
 
 ### Changed (BREAKING)
-- Renamed package from `xlsx-mcp-server` to `@llamadrive/xlsx-mcp-server`. Update your `.mcp.json` / install commands to the scoped name.
+- Renamed package from `xlsx-mcp-server` to `@knorq/xlsx-mcp-server`. Update your `.mcp.json` / install commands to the scoped name.
 - Pinned `engines.node` to `>=18.0.0`.
 
 ### Added

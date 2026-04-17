@@ -39,7 +39,7 @@ write_cells →  cells: [{cell: "B1", value: "=A1*2"}, {cell: "B2", value: "=VLO
 ### Option 1: Install from npm
 
 ```bash
-npm install -g @llamadrive/xlsx-mcp-server
+npm install -g @knorq/xlsx-mcp-server
 ```
 
 Then add to your MCP config (see [Configuration](#configuration) below).
@@ -53,7 +53,7 @@ Just add the config — `npx` downloads and runs it automatically:
   "mcpServers": {
     "xlsx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/xlsx-mcp-server"]
+      "args": ["-y", "@knorq/xlsx-mcp-server"]
     }
   }
 }
@@ -80,7 +80,7 @@ Add to your project's `.mcp.json` (per-project) or `~/.claude/settings.json` (gl
   "mcpServers": {
     "xlsx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/xlsx-mcp-server"]
+      "args": ["-y", "@knorq/xlsx-mcp-server"]
     }
   }
 }
@@ -95,7 +95,7 @@ Add to your MCP server configuration in Cursor settings:
   "mcpServers": {
     "xlsx-editor": {
       "command": "npx",
-      "args": ["-y", "@llamadrive/xlsx-mcp-server"]
+      "args": ["-y", "@knorq/xlsx-mcp-server"]
     }
   }
 }
@@ -139,7 +139,7 @@ npm publish
 Recipients install with:
 
 ```bash
-npm install -g @llamadrive/xlsx-mcp-server
+npm install -g @knorq/xlsx-mcp-server
 ```
 
 Or skip the install entirely — just share the `.mcp.json` config with the `npx` setup above and it works out of the box.
