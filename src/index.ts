@@ -53,6 +53,17 @@ import {
   unmergeCells,
   EngineError,
 } from "./xlsx-engine.js";
+import {
+  parseCellAddress,
+  parseRange,
+  columnLetterToNumber,
+  type CellRange,
+} from "./engine/cells.js";
+import {
+  loadSafetyConfig,
+  assertCellCount,
+  assertWithinTemplate,
+} from "./engine/safety.js";
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require("../package.json") as { version: string };
@@ -65,6 +76,19 @@ function formatError(e: unknown): string {
     return `[INTERNAL_ERROR] ${e.message}`;
   }
   return `[INTERNAL_ERROR] ${String(e)}`;
+}
+
+// F-002 enforcement: env-driven cell-count cap and template-mode whitelist.
+// Loaded once at startup so the LLM cannot disable them via tool parameters.
+const safetyConfig = loadSafetyConfig();
+
+function cellAddrToRange(addr: string): CellRange {
+  const { col, row } = parseCellAddress(addr);
+  return { startCol: col, startRow: row, endCol: col, endRow: row };
+}
+
+function rowRange(row: number, startCol: number, endCol: number): CellRange {
+  return { startCol, endCol, startRow: row, endRow: row };
 }
 
 // Shared schemas
@@ -258,6 +282,8 @@ server.tool(
   },
   async ({ file_path, sheet, cell, value }) => {
     try {
+      assertCellCount(1, "write_cell", safetyConfig);
+      assertWithinTemplate(sheet, cellAddrToRange(cell), safetyConfig);
       const result = await writeCell(file_path, sheet, cell, value);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -279,6 +305,10 @@ server.tool(
   },
   async ({ file_path, sheet, cells }) => {
     try {
+      assertCellCount(cells.length, "write_cells", safetyConfig);
+      for (const c of cells) {
+        assertWithinTemplate(sheet, cellAddrToRange(c.cell), safetyConfig);
+      }
       const result = await writeCells(file_path, sheet, cells);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -299,6 +329,9 @@ server.tool(
   },
   async ({ file_path, sheet, row, values, start_column }) => {
     try {
+      assertCellCount(values.length, "write_row", safetyConfig);
+      const startCol = columnLetterToNumber(start_column ?? "A");
+      assertWithinTemplate(sheet, rowRange(row, startCol, startCol + values.length - 1), safetyConfig);
       const result = await writeRow(file_path, sheet, row, values, start_column);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -319,6 +352,19 @@ server.tool(
   },
   async ({ file_path, sheet, start_row, rows, start_column }) => {
     try {
+      const maxCols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+      assertCellCount(rows.length * maxCols, "write_rows", safetyConfig);
+      const startCol = columnLetterToNumber(start_column ?? "A");
+      assertWithinTemplate(
+        sheet,
+        {
+          startCol,
+          endCol: startCol + Math.max(maxCols - 1, 0),
+          startRow: start_row,
+          endRow: start_row + Math.max(rows.length - 1, 0),
+        },
+        safetyConfig,
+      );
       const result = await writeRows(file_path, sheet, start_row, rows, start_column);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -337,6 +383,10 @@ server.tool(
   },
   async ({ file_path, sheet, range }) => {
     try {
+      const r = parseRange(range);
+      const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
+      assertCellCount(cells, "clear_cells", safetyConfig);
+      assertWithinTemplate(sheet, r, safetyConfig);
       const result = await clearCells(file_path, sheet, range);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -383,6 +433,10 @@ server.tool(
   },
   async ({ file_path, sheet, range, format }) => {
     try {
+      const r = parseRange(range);
+      const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
+      assertCellCount(cells, "format_cells", safetyConfig);
+      assertWithinTemplate(sheet, r, safetyConfig);
       const result = await formatCells(file_path, sheet, range, format);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -404,6 +458,13 @@ server.tool(
   },
   async ({ file_path, sheet, groups }) => {
     try {
+      let total = 0;
+      for (const g of groups) {
+        const r = parseRange(g.range);
+        total += (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
+        assertWithinTemplate(sheet, r, safetyConfig);
+      }
+      assertCellCount(total, "format_cells_bulk", safetyConfig);
       const result = await formatCellsBulk(file_path, sheet, groups);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {

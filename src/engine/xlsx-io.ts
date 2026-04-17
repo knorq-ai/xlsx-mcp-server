@@ -66,6 +66,8 @@ export const ErrorCode = {
   NAMED_RANGE_NOT_FOUND: "NAMED_RANGE_NOT_FOUND",
   DUPLICATE_NAME: "DUPLICATE_NAME",
   INVALID_PARAMETER: "INVALID_PARAMETER",
+  MAX_CELLS_EXCEEDED: "MAX_CELLS_EXCEEDED",
+  OUTSIDE_TEMPLATE_RANGE: "OUTSIDE_TEMPLATE_RANGE",
 } as const;
 
 export type ErrorCodeType = (typeof ErrorCode)[keyof typeof ErrorCode];
