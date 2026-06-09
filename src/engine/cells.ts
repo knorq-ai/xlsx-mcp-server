@@ -157,10 +157,14 @@ export function getCellData(cell: ExcelJS.Cell): CellData {
     return result;
   }
 
-  // SharedFormula
+  // SharedFormula (slave cell of a shared-formula group).
+  // ExcelJS stores the *master cell's address* in `sharedFormula` (e.g. "G2"),
+  // not this cell's actual formula. The cell-level `cell.formula` getter
+  // resolves the per-cell formula by sliding the master's relative references
+  // to this cell's position (so H2 in a G2:I2 group becomes `$C2*E2`, not `G2`).
   if (typeof v === "object" && v !== null && "sharedFormula" in v) {
     const sv = v as ExcelJS.CellSharedFormulaValue;
-    result.formula = sv.sharedFormula;
+    result.formula = cell.formula ?? sv.sharedFormula;
     result.value = sv.result ?? null;
     result.type = "formula";
     if (cell.numFmt) result.numFmt = cell.numFmt;
