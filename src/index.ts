@@ -51,7 +51,18 @@ import {
   deleteNamedRange,
   mergeCells,
   unmergeCells,
+  copyRange,
+  findReplace,
+  sortRange,
+  setCellNote,
+  setSheetProperties,
+  setRowVisibility,
+  setColumnVisibility,
+  protectSheet,
+  unprotectSheet,
+  setPageSetup,
   EngineError,
+  ErrorCode,
 } from "./xlsx-engine.js";
 import {
   parseCellAddress,
@@ -95,7 +106,17 @@ function rowRange(row: number, startCol: number, endCol: number): CellRange {
 // Shared schemas
 const filePathSchema = z.string().describe("Absolute path to the .xlsx file");
 const sheetSchema = z.union([z.string(), z.number().int().min(1)]).describe("Sheet name or 1-based index");
-const cellValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const cellValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.object({ date: z.string().describe("ISO date, e.g. '2024-01-15' or '2024-01-15T09:30:00Z'") }).strict(),
+  z.object({
+    hyperlink: z.string().describe("Target URL"),
+    text: z.string().optional().describe("Display text (defaults to the URL)"),
+  }).strict(),
+]).describe("Cell value. Strings starting with '=' are written as formulas ('=text to escape a literal). Use {date: 'ISO'} for true Excel dates, {hyperlink, text} for links.");
 const cellAddressSchema = z.string().regex(/^[A-Za-z]+\d+$/, "Invalid cell address (expected A1 format)").describe("Cell address (e.g. 'A1', 'B5')");
 const columnSchema = z.string().regex(/^[A-Za-z]+$/, "Invalid column letter").describe("Column letter (e.g. 'A', 'BC')");
 const hexColorSchema = z.string().regex(/^[0-9A-Fa-f]{6}$/, "Invalid hex color (expected 6-char hex, e.g. 'FF0000')");
@@ -429,21 +450,22 @@ server.registerTool(
 server.registerTool(
   "clear_cells",
   {
-    description: "Clear cell values in a range (keeps formatting).",
+    description: "Clear cell values and/or formatting in a range. mode='values' (default) keeps formatting, 'formats' keeps values, 'all' clears both.",
     inputSchema: {
       file_path: filePathSchema,
       sheet: sheetSchema,
       range: z.string().describe("Range to clear (e.g. 'A1:C10')"),
+      mode: z.enum(["values", "formats", "all"]).optional().default("values").describe("What to clear (default 'values')"),
     },
     annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
-  async ({ file_path, sheet, range }) => {
+  async ({ file_path, sheet, range, mode }) => {
     try {
       const r = parseRange(range);
       const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
       assertCellCount(cells, "clear_cells", safetyConfig);
       assertWithinTemplate(sheet, r, safetyConfig);
-      const result = await clearCells(file_path, sheet, range);
+      const result = await clearCells(file_path, sheet, range, mode);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
@@ -634,19 +656,20 @@ server.registerTool(
 server.registerTool(
   "insert_rows",
   {
-    description: "Insert empty rows at the specified position. Existing rows shift down. WARNING: references inside existing formulas are NOT updated — do structural changes before writing formulas.",
+    description: "Insert empty rows at the specified position. Existing rows shift down. Set inherit_style=true to copy formatting from the row above. WARNING: references inside existing formulas are NOT updated — do structural changes before writing formulas.",
     inputSchema: {
       file_path: filePathSchema,
       sheet: sheetSchema,
       row: rowSchema.describe("Row number to insert before (1-based)"),
       count: countSchema.describe("Number of rows to insert"),
+      inherit_style: z.boolean().optional().default(false).describe("Copy formatting (and row height) from the row above the insertion point"),
     },
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
-  async ({ file_path, sheet, row, count }) => {
+  async ({ file_path, sheet, row, count, inherit_style }) => {
     try {
       assertStructuralChangeAllowed("insert_rows", safetyConfig);
-      const result = await insertRows(file_path, sheet, row, count);
+      const result = await insertRows(file_path, sheet, row, count, inherit_style);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
@@ -1030,6 +1053,268 @@ server.registerTool(
       assertCellCount(cells, "unmerge_cells", safetyConfig);
       assertWithinTemplate(sheet, r, safetyConfig);
       const result = await unmergeCells(file_path, sheet, range);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// =========================================================================
+// Range tools — copy, find/replace, sort
+// =========================================================================
+
+server.registerTool(
+  "copy_range",
+  {
+    description: "Copy a cell range (values, formulas, formatting, merges) to another location, optionally on a different sheet. Relative references inside formulas are shifted to the destination ($-anchored references stay fixed). Existing content at the destination is overwritten.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema.describe("Source sheet"),
+      source_range: z.string().describe("Range to copy (e.g. 'A1:C10')"),
+      destination: cellAddressSchema.describe("Top-left cell of the destination (e.g. 'E1')"),
+      dest_sheet: sheetSchema.optional().describe("Destination sheet (defaults to the source sheet)"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, source_range, destination, dest_sheet }) => {
+    try {
+      const src = parseRange(source_range);
+      const cells = (src.endRow - src.startRow + 1) * (src.endCol - src.startCol + 1);
+      assertCellCount(cells, "copy_range", safetyConfig);
+      const dst = parseCellAddress(destination);
+      const destRegion: CellRange = {
+        startRow: dst.row,
+        startCol: dst.col,
+        endRow: dst.row + (src.endRow - src.startRow),
+        endCol: dst.col + (src.endCol - src.startCol),
+      };
+      assertWithinTemplate(dest_sheet ?? sheet, destRegion, safetyConfig);
+      const result = await copyRange(file_path, sheet, source_range, destination, dest_sheet);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "find_replace",
+  {
+    description: "Find and replace text across plain string cells. Formulas, numbers, rich text, and hyperlinks are not modified. Searches all sheets unless one is specified.",
+    inputSchema: {
+      file_path: filePathSchema,
+      query: z.string().min(1).describe("Text to find"),
+      replacement: z.string().describe("Replacement text (may be empty to delete the match)"),
+      sheet: sheetSchema.optional().describe("Sheet to operate on (omit for all sheets)"),
+      case_sensitive: z.boolean().optional().default(false).describe("Case-sensitive matching. Default false."),
+      match_entire_cell: z.boolean().optional().default(false).describe("Replace only cells whose entire content equals the query"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ file_path, query, replacement, sheet, case_sensitive, match_entire_cell }) => {
+    try {
+      if (safetyConfig.templateMode) {
+        throw new EngineError(
+          ErrorCode.OUTSIDE_TEMPLATE_RANGE,
+          "find_replace is disabled in template mode: it cannot be constrained to the declared ranges. Use search_cells + write_cells instead.",
+        );
+      }
+      const result = await findReplace(file_path, query, replacement, sheet, case_sensitive, match_entire_cell);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "sort_range",
+  {
+    description: "Sort the rows of a range by a key column (values, formulas, and formatting move together; relative formula references are shifted). Numbers sort before text; empty cells always sort last. Fails if the range intersects merged cells.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range to sort (e.g. 'A2:F50')"),
+      key_column: columnSchema.describe("Column letter to sort by (must be inside the range)"),
+      ascending: z.boolean().optional().default(true).describe("Sort direction. Default ascending."),
+      has_header: z.boolean().optional().default(false).describe("Skip the first row of the range (header)"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, range, key_column, ascending, has_header }) => {
+    try {
+      const r = parseRange(range);
+      const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
+      assertCellCount(cells, "sort_range", safetyConfig);
+      assertWithinTemplate(sheet, r, safetyConfig);
+      const result = await sortRange(file_path, sheet, range, key_column, ascending, has_header);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// =========================================================================
+// Cell note / sheet appearance / protection / page setup tools
+// =========================================================================
+
+server.registerTool(
+  "set_cell_note",
+  {
+    description: "Set or remove a cell note (comment). Pass null to remove.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      cell: cellAddressSchema,
+      note: z.union([z.string(), z.null()]).describe("Note text, or null to remove the note"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, cell, note }) => {
+    try {
+      const result = await setCellNote(file_path, sheet, cell, note);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_sheet_properties",
+  {
+    description: "Set sheet visibility (visible/hidden/veryHidden) and/or tab color. A workbook must keep at least one visible sheet.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      state: z.enum(["visible", "hidden", "veryHidden"]).optional().describe("Sheet visibility. 'veryHidden' sheets can only be re-shown programmatically."),
+      tab_color: z.union([hexColorSchema, z.null()]).optional().describe("Tab color as 6-char hex (e.g. 'FF0000'), or null to remove"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, state, tab_color }) => {
+    try {
+      const result = await setSheetProperties(file_path, sheet, { state, tabColor: tab_color });
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_row_visibility",
+  {
+    description: "Hide or unhide a range of rows.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      start_row: rowSchema.describe("First row"),
+      end_row: rowSchema.describe("Last row (inclusive)"),
+      hidden: z.boolean().describe("true to hide, false to unhide"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, start_row, end_row, hidden }) => {
+    try {
+      const result = await setRowVisibility(file_path, sheet, start_row, end_row, hidden);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_column_visibility",
+  {
+    description: "Hide or unhide a range of columns.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      start_column: columnSchema.describe("First column letter"),
+      end_column: columnSchema.describe("Last column letter (inclusive)"),
+      hidden: z.boolean().describe("true to hide, false to unhide"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, start_column, end_column, hidden }) => {
+    try {
+      const result = await setColumnVisibility(file_path, sheet, start_column, end_column, hidden);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "protect_sheet",
+  {
+    description: "Protect a sheet against editing in Excel, optionally with a password. NOTE: this is Excel UI-level protection, not encryption — this server and other tools can still modify the file.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      password: z.string().optional().describe("Optional protection password"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, password }) => {
+    try {
+      const result = await protectSheet(file_path, sheet, password);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "unprotect_sheet",
+  {
+    description: "Remove sheet protection.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet }) => {
+    try {
+      const result = await unprotectSheet(file_path, sheet);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_page_setup",
+  {
+    description: "Configure print/PDF layout: orientation, print area, fit-to-page, paper size.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      orientation: z.enum(["portrait", "landscape"]).optional().describe("Page orientation"),
+      print_area: z.string().optional().describe("Print area range (e.g. 'A1:G40')"),
+      fit_to_width: z.number().int().min(1).optional().describe("Fit to N pages wide"),
+      fit_to_height: z.number().int().min(1).optional().describe("Fit to N pages tall"),
+      paper_size: z.enum(["A4", "A3", "letter", "legal"]).optional().describe("Paper size"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, orientation, print_area, fit_to_width, fit_to_height, paper_size }) => {
+    try {
+      const result = await setPageSetup(file_path, sheet, {
+        orientation,
+        printArea: print_area,
+        fitToWidth: fit_to_width,
+        fitToHeight: fit_to_height,
+        paperSize: paper_size,
+      });
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
