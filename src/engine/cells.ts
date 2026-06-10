@@ -101,6 +101,13 @@ export interface CellRange {
 /** "A1:C5" or "A1" → CellRange (1-based) */
 export function parseRange(range: string): CellRange {
   const parts = range.split(":");
+  if (/^[A-Za-z]+$/.test(parts[0]) || /^\d+$/.test(parts[0])) {
+    throw new EngineError(
+      ErrorCode.INVALID_RANGE,
+      `Whole-column/whole-row ranges like "A:A" or "1:3" are not supported. ` +
+        `Specify explicit cells, e.g. "A1:A100" (range given: ${range}).`,
+    );
+  }
   if (parts.length === 1) {
     const addr = parseCellAddress(parts[0]);
     return { startCol: addr.col, startRow: addr.row, endCol: addr.col, endRow: addr.row };
@@ -156,6 +163,33 @@ export interface CellData {
   mergeRange?: string;
   /** If this cell is a non-master part of a merge, the master cell address */
   mergedWith?: string;
+  /** Hyperlink target URL (for hyperlink cells) */
+  hyperlink?: string;
+  /**
+   * True when a formula has no cached result (e.g. it was just written by
+   * this server). The real value appears after Excel recalculates the file.
+   */
+  uncalculated?: boolean;
+  /**
+   * Degraded shared-formula group: the master cell address when the per-cell
+   * formula could not be resolved (master missing or not a formula cell).
+   * Never reported in `formula`.
+   */
+  sharedGroupMaster?: string;
+}
+
+/** 数式のキャッシュ済み結果を CellData.value 用に正規化する */
+function normalizeFormulaResult(result: CellData, res: unknown): void {
+  if (res === undefined || res === null) {
+    result.value = null;
+    result.uncalculated = true;
+  } else if (res instanceof Date) {
+    result.value = res.toISOString();
+  } else if (typeof res === "object" && "error" in (res as Record<string, unknown>)) {
+    result.value = (res as ExcelJS.CellErrorValue).error;
+  } else {
+    result.value = res;
+  }
 }
 
 /** ExcelJS Cell → CellData */
@@ -187,7 +221,7 @@ export function getCellData(cell: ExcelJS.Cell): CellData {
   if (typeof v === "object" && v !== null && "formula" in v) {
     const fv = v as ExcelJS.CellFormulaValue;
     result.formula = fv.formula;
-    result.value = fv.result ?? null;
+    normalizeFormulaResult(result, fv.result);
     result.type = "formula";
     if (cell.numFmt) result.numFmt = cell.numFmt;
     return result;
@@ -198,10 +232,26 @@ export function getCellData(cell: ExcelJS.Cell): CellData {
   // not this cell's actual formula. The cell-level `cell.formula` getter
   // resolves the per-cell formula by sliding the master's relative references
   // to this cell's position (so H2 in a G2:I2 group becomes `$C2*E2`, not `G2`).
+  //
+  // 他ソフトが生成した不整合ファイルでは、マスターが数式セルでない
+  // （translation が throw する）/ マスターが存在しない（undefined が返る）
+  // ことがある。その場合も formula にマスターアドレスを出さず、
+  // sharedGroupMaster に分離して返す。
   if (typeof v === "object" && v !== null && "sharedFormula" in v) {
     const sv = v as ExcelJS.CellSharedFormulaValue;
-    result.formula = cell.formula ?? sv.sharedFormula;
-    result.value = sv.result ?? null;
+    let translated: string | undefined;
+    try {
+      const f = cell.formula;
+      translated = typeof f === "string" && f.length > 0 ? f : undefined;
+    } catch {
+      translated = undefined;
+    }
+    if (translated !== undefined) {
+      result.formula = translated;
+    } else if (typeof sv.sharedFormula === "string") {
+      result.sharedGroupMaster = sv.sharedFormula;
+    }
+    normalizeFormulaResult(result, sv.result);
     result.type = "formula";
     if (cell.numFmt) result.numFmt = cell.numFmt;
     return result;
@@ -218,7 +268,8 @@ export function getCellData(cell: ExcelJS.Cell): CellData {
   // Hyperlink
   if (typeof v === "object" && v !== null && "hyperlink" in v) {
     const hv = v as ExcelJS.CellHyperlinkValue;
-    result.value = hv.text;
+    result.value = hv.text ?? hv.hyperlink;
+    result.hyperlink = hv.hyperlink;
     result.type = "hyperlink";
     return result;
   }
@@ -253,25 +304,152 @@ export function getCellData(cell: ExcelJS.Cell): CellData {
   return result;
 }
 
+/** 書き込み可能なセル値。オブジェクト形式は日付・ハイパーリンク用 */
+export type CellWriteValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { date: string }
+  | { hyperlink: string; text?: string };
+
 /**
  * セルに値を設定する。
- * value が "=" で始まる場合は数式として扱う。
+ * - "=" で始まる文字列は数式として扱う（リテラルにしたい場合は "'=" でエスケープ）
+ * - { date: "2024-01-15" } は Excel の日付値として書き込む
+ * - { hyperlink: "https://...", text?: "..." } はハイパーリンクとして書き込む
+ * - 結合セルの子セルへの書き込みはマスター値を黙って上書きするため拒否する
  */
 export function setCellValue(
   cell: ExcelJS.Cell,
-  value: string | number | boolean | null,
+  value: CellWriteValue,
 ): void {
+  // 結合セルの子への書き込みガード：ExcelJS は子セルへの代入を
+  // マスターセルに委譲するため、意図しないセルが上書きされる。
+  if (cell.isMerged && cell.master.address !== cell.address) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Cell ${cell.address} is part of a merged range (master: ${cell.master.address}). ` +
+        `Writing here would overwrite the master's value. Write to ${cell.master.address} instead, or unmerge_cells first.`,
+    );
+  }
+
   if (value === null) {
     cell.value = null;
     return;
   }
 
-  if (typeof value === "string" && value.startsWith("=")) {
-    cell.value = { formula: value.slice(1) } as ExcelJS.CellFormulaValue;
-    return;
+  if (typeof value === "object") {
+    if ("date" in value) {
+      const d = new Date(value.date);
+      if (Number.isNaN(d.getTime())) {
+        throw new EngineError(
+          ErrorCode.INVALID_PARAMETER,
+          `Invalid date: ${JSON.stringify(value.date)}. Use ISO format, e.g. "2024-01-15" or "2024-01-15T09:30:00Z".`,
+        );
+      }
+      cell.value = d;
+      return;
+    }
+    if ("hyperlink" in value) {
+      cell.value = {
+        text: value.text ?? value.hyperlink,
+        hyperlink: value.hyperlink,
+      } as ExcelJS.CellHyperlinkValue;
+      return;
+    }
   }
 
+  if (typeof value === "string") {
+    if (value.startsWith("=")) {
+      detachSharedFormulaGroupIfMaster(cell);
+      cell.value = { formula: value.slice(1) } as ExcelJS.CellFormulaValue;
+      return;
+    }
+    // "'=" → リテラル文字列 "=..."（Excel と同じエスケープ規則）
+    if (value.startsWith("'=")) {
+      detachSharedFormulaGroupIfMaster(cell);
+      cell.value = value.slice(1);
+      return;
+    }
+  }
+
+  detachSharedFormulaGroupIfMaster(cell);
   cell.value = value;
+}
+
+/**
+ * 共有数式グループのマスターセルを上書きする前に、スレーブセルを
+ * それぞれ独立した通常の数式セルに変換（実体化）する。
+ * これを行わないとマスター上書き後の保存が
+ * "Shared Formula master must exist above and or left of clone" で失敗する。
+ */
+function detachSharedFormulaGroupIfMaster(cell: ExcelJS.Cell): void {
+  const v = cell.value;
+  const isSharedMaster =
+    typeof v === "object" &&
+    v !== null &&
+    "formula" in v &&
+    (v as { shareType?: string }).shareType === "shared";
+  if (!isSharedMaster) return;
+  materializeSharedFormulas(cell.worksheet, cell.address);
+}
+
+/**
+ * 共有数式グループを通常の数式セルに変換する。
+ * masterAddress を指定するとそのマスターのグループのみ、省略すると
+ * シート内の全グループを実体化する。
+ * （splice 系操作の前にも呼ぶ — ExcelJS はスレーブの sharedFormula
+ * ポインタをシフトしないため、放置すると保存時に throw する。）
+ */
+export function materializeSharedFormulas(
+  ws: ExcelJS.Worksheet,
+  masterAddress?: string,
+): void {
+  const slaves: ExcelJS.Cell[] = [];
+  const masters: ExcelJS.Cell[] = [];
+
+  ws.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      const v = cell.value;
+      if (typeof v !== "object" || v === null) return;
+      if ("sharedFormula" in v) {
+        const sv = v as ExcelJS.CellSharedFormulaValue;
+        if (masterAddress === undefined || sv.sharedFormula === masterAddress) {
+          slaves.push(cell);
+        }
+      } else if (
+        "formula" in v &&
+        (v as { shareType?: string }).shareType === "shared"
+      ) {
+        if (masterAddress === undefined || cell.address === masterAddress) {
+          masters.push(cell);
+        }
+      }
+    });
+  });
+
+  for (const cell of slaves) {
+    const sv = cell.value as ExcelJS.CellSharedFormulaValue;
+    let translated: string | undefined;
+    try {
+      const f = cell.formula;
+      translated = typeof f === "string" && f.length > 0 ? f : undefined;
+    } catch {
+      translated = undefined;
+    }
+    if (translated !== undefined) {
+      cell.value = { formula: translated, result: sv.result } as ExcelJS.CellFormulaValue;
+    } else {
+      // 数式を復元できない場合はキャッシュ済み結果を値として残す
+      cell.value = (sv.result ?? null) as ExcelJS.CellValue;
+    }
+  }
+
+  for (const cell of masters) {
+    const fv = cell.value as ExcelJS.CellFormulaValue & { shareType?: string; ref?: string };
+    cell.value = { formula: fv.formula, result: fv.result } as ExcelJS.CellFormulaValue;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +466,10 @@ export interface SheetData {
   mergedCells?: string[];
   /** True when compact mode was used (merged children and empty cells omitted) */
   compact?: boolean;
+  /** True when output was cut off at the cell cap — use `range` to read the rest */
+  truncated?: boolean;
+  /** Last row included in the output when truncated */
+  truncatedAtRow?: number;
 }
 
 export interface RowData {
@@ -300,6 +482,13 @@ export interface ReadSheetOptions {
   /** Compact mode: omit merged children and empty cells to reduce output size */
   compact?: boolean;
 }
+
+/**
+ * read_sheet が 1 回の呼び出しで出力するセル数の上限。
+ * 超過分は行単位で打ち切り、truncated フラグで通知する
+ * （LLM コンテキストの溢れ防止。range 指定で続きを読める）。
+ */
+export const MAX_READ_CELLS = 5_000;
 
 /**
  * シートからデータを読み取る。range / compact 指定可。
@@ -329,6 +518,8 @@ export function readSheetData(
 
   // Collect merge ranges from worksheet internals.
   // ExcelJS stores merges as Range objects with .tl / .br getters.
+  // mergedCells には読み取り範囲と交差する結合のみ載せる（範囲読み取りで
+  // シート全体の結合一覧を返すとトークンを浪費するため）。
   const merges = (ws as unknown as { _merges?: Record<string, { tl: string; br: string }> })._merges;
   const mergeMap = new Map<string, string>(); // master address → "A1:C1"
   const mergedCells: string[] = [];
@@ -337,12 +528,21 @@ export function readSheetData(
       if (dim && dim.tl && dim.br) {
         const rangeLabel = `${dim.tl}:${dim.br}`;
         mergeMap.set(addr, rangeLabel);
-        mergedCells.push(rangeLabel);
+        const mr = parseRange(rangeLabel);
+        const intersects =
+          mr.startRow <= endRow && mr.endRow >= startRow &&
+          mr.startCol <= endCol && mr.endCol >= startCol;
+        if (intersects) {
+          mergedCells.push(rangeLabel);
+        }
       }
     }
   }
 
   const data: RowData[] = [];
+  let emittedCells = 0;
+  let truncated = false;
+  let truncatedAtRow = 0;
 
   for (let r = startRow; r <= endRow; r++) {
     const row = ws.getRow(r);
@@ -361,10 +561,12 @@ export function readSheetData(
         cd.mergeRange = mr;
       }
 
-      // Compact mode: skip merged children and empty non-anchor cells
+      // Compact mode: skip merged children and empty non-anchor cells.
+      // 数式セルは結果未計算（value === null）でも省略しない — 省略すると
+      // LLM が空セルと誤認して数式を上書きする。
       if (compact) {
         if (cd.mergedWith) continue;
-        if (cd.value === null && !cd.mergeRange) continue;
+        if (cd.value === null && !cd.formula && !cd.mergeRange) continue;
       }
 
       cells.push(cd);
@@ -372,9 +574,19 @@ export function readSheetData(
 
     // 空行をスキップ（range 指定時は含める。compact 時は空行を常にスキップ）
     if (compact) {
-      if (cells.length > 0) data.push({ row: r, cells });
+      if (cells.length > 0) {
+        data.push({ row: r, cells });
+        emittedCells += cells.length;
+      }
     } else if (hasValue || range) {
       data.push({ row: r, cells });
+      emittedCells += cells.length;
+    }
+
+    if (emittedCells >= MAX_READ_CELLS && r < endRow) {
+      truncated = true;
+      truncatedAtRow = r;
+      break;
     }
   }
 
@@ -395,6 +607,10 @@ export function readSheetData(
   if (compact) {
     result.compact = true;
   }
+  if (truncated) {
+    result.truncated = true;
+    result.truncatedAtRow = truncatedAtRow;
+  }
   return result;
 }
 
@@ -411,17 +627,22 @@ export interface SearchMatch {
 
 /**
  * ワークシート内のセルを検索する。
+ * limit を超えるマッチは収集しない（呼び出し側が打ち切りを検出できるよう、
+ * limit+1 件目までは返す運用を想定）。
  */
 export function searchInSheet(
   ws: ExcelJS.Worksheet,
   query: string,
   caseSensitive: boolean,
+  limit: number = Number.POSITIVE_INFINITY,
 ): SearchMatch[] {
   const matches: SearchMatch[] = [];
   const q = caseSensitive ? query : query.toLowerCase();
 
   ws.eachRow((row) => {
+    if (matches.length >= limit) return;
     row.eachCell((cell) => {
+      if (matches.length >= limit) return;
       const data = getCellData(cell);
       const textValue = String(data.value ?? "");
       const target = caseSensitive ? textValue : textValue.toLowerCase();

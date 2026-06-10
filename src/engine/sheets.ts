@@ -109,17 +109,28 @@ export function copyWorksheet(
     row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
       const destCell = destRow.getCell(colNumber);
       destCell.value = cell.value;
-      destCell.style = { ...cell.style };
+      // 深いコピー：シャローコピーだと font/border 等のネストオブジェクトを
+      // コピー元シートと共有してしまい、後の書式変更が双方に波及する
+      destCell.style = structuredClone(cell.style);
     });
     destRow.commit();
   });
 
   // Copy merged cells
-  // Access through model since mergeCells is the only public API for merges
+  // Access through model since mergeCells is the only public API for merges.
+  // mergeCells はマスターの style を結合範囲全体へ複製してセル個別の書式を
+  // 壊すため、style に触れない内部 API を優先する。
   const merges = source.model?.merges;
   if (merges) {
+    const destInternal = dest as unknown as {
+      mergeCellsWithoutStyle?: (range: string) => void;
+    };
     for (const merge of merges) {
-      dest.mergeCells(merge);
+      if (typeof destInternal.mergeCellsWithoutStyle === "function") {
+        destInternal.mergeCellsWithoutStyle(merge);
+      } else {
+        dest.mergeCells(merge);
+      }
     }
   }
 

@@ -13,6 +13,7 @@ import { ErrorCode, EngineError } from "./xlsx-io.js";
 import {
   parseRange,
   rangeToString,
+  materializeSharedFormulas,
   EXCEL_MAX_ROWS as MAX_ROWS,
   EXCEL_MAX_COLS as MAX_COLS,
   type CellRange,
@@ -25,6 +26,12 @@ function validateRowBounds(row: number, count: number): void {
   if (count < 1) {
     throw new EngineError(ErrorCode.INVALID_PARAMETER, `Count must be at least 1`);
   }
+  if (count > MAX_ROWS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Count ${count.toLocaleString()} exceeds Excel's row limit (${MAX_ROWS.toLocaleString()})`,
+    );
+  }
 }
 
 function validateColumnBounds(col: number, count: number): void {
@@ -33,6 +40,12 @@ function validateColumnBounds(col: number, count: number): void {
   }
   if (count < 1) {
     throw new EngineError(ErrorCode.INVALID_PARAMETER, `Count must be at least 1`);
+  }
+  if (count > MAX_COLS) {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Count ${count.toLocaleString()} exceeds Excel's column limit (${MAX_COLS.toLocaleString()})`,
+    );
   }
 }
 
@@ -179,6 +192,11 @@ function spliceWithLayoutPreserved(
   mutate: () => void,
 ): void {
   const mapper = makeMapper(axis, op, pos, count);
+
+  // 共有数式グループを通常の数式に実体化する。ExcelJS の splice は
+  // スレーブの sharedFormula ポインタをシフトしないため、放置すると
+  // 保存時に "Shared Formula master must exist above..." で失敗する。
+  materializeSharedFormulas(ws);
 
   const allMerges = getMergeRanges(ws);
   const affected = allMerges.filter((r) =>

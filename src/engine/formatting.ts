@@ -49,6 +49,12 @@ export function applyCellFormat(
   cell: ExcelJS.Cell,
   opts: CellFormatOptions,
 ): void {
+  // ExcelJS はファイル読み込み時に同一書式のセル間で style オブジェクトを
+  // 共有する。そのまま部分更新すると無関係なセルの書式まで変わるため、
+  // まず自前のシャローコピーに差し替えて共有を断つ
+  // （font/fill/border/alignment は以下で常に新しいオブジェクトを代入する）。
+  cell.style = { ...cell.style };
+
   // Font
   if (
     opts.bold !== undefined ||
@@ -78,10 +84,14 @@ export function applyCellFormat(
     if (opts.fillPattern === "none") {
       cell.fill = { type: "pattern", pattern: "none" };
     } else {
+      // fillPattern: "solid" のみ指定のときは既存の塗り色を保持する（白で潰さない）
+      const existingFg = (cell.fill as ExcelJS.FillPattern | undefined)?.fgColor;
       cell.fill = {
         type: "pattern",
         pattern: "solid",
-        fgColor: { argb: `FF${opts.fillColor ?? "FFFFFF"}` },
+        fgColor: opts.fillColor !== undefined
+          ? { argb: `FF${opts.fillColor}` }
+          : existingFg ?? { argb: "FFFFFFFF" },
       };
     }
   }

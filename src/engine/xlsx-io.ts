@@ -50,6 +50,13 @@ if (typeof _origParseMergeCells === "function") {
       }
     }
   };
+} else {
+  // ExcelJS 内部が変わってパッチが当たらない場合に黙って劣化しないよう警告する
+  // （stdout は MCP のプロトコルチャネルなので stderr に出す）
+  console.error(
+    "[xlsx-mcp-server] WARNING: ExcelJS Worksheet._parseMergeCells not found — " +
+      "duplicate-merge tolerance patch is inactive. Files with overlapping merges may fail to open.",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +142,15 @@ export async function openXlsx(filePath: string): Promise<XlsxHandle> {
  * 結果を無効化しても再計算できないため（Excel が開いたときに再計算させる）。
  */
 export async function saveXlsx(handle: XlsxHandle): Promise<void> {
+  const ext = path.extname(handle.filePath).toLowerCase();
+  if (ext === ".xlsm" || ext === ".xltm") {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Writing to macro-enabled workbooks (${ext}) is not supported: ExcelJS cannot ` +
+        `preserve VBA projects, so saving would silently destroy all macros. ` +
+        `The file is readable; to edit it, copy it to .xlsx first.`,
+    );
+  }
   handle.workbook.calcProperties.fullCalcOnLoad = true;
   const dir = path.dirname(handle.filePath);
   const tmpPath = path.join(
@@ -179,9 +195,13 @@ export function resolveSheet(
   }
 
   if (!ws) {
+    const available = workbook.worksheets.map((s) => `"${s.name}"`).join(", ");
+    const digitHint = /^\d+$/.test(sheet as string)
+      ? ` (to address a sheet by position, pass the number ${sheet} as a JSON number, not a string)`
+      : "";
     throw new EngineError(
       ErrorCode.SHEET_NOT_FOUND,
-      `Sheet not found: ${sheet}`,
+      `Sheet not found: "${sheet}"${digitHint}. Available sheets: ${available}`,
     );
   }
 

@@ -96,6 +96,20 @@ function rangeContains(outer: CellRange, inner: CellRange): boolean {
   );
 }
 
+/**
+ * テンプレートモード中は構造変更操作（行・列の挿入/削除、シート削除/改名）を
+ * 拒否する。これらはセルをシフトさせるため、静的な "Sheet!Range" ホワイト
+ * リスト自体を無効化してしまう。
+ */
+export function assertStructuralChangeAllowed(tool: string, cfg: SafetyConfig): void {
+  if (!cfg.templateMode) return;
+  throw new EngineError(
+    ErrorCode.OUTSIDE_TEMPLATE_RANGE,
+    `${tool} is disabled while XLSX_TEMPLATE_MODE is on: structural changes would ` +
+      `shift cells out of the declared template ranges. Disable template mode to use it.`,
+  );
+}
+
 export function assertWithinTemplate(
   sheet: string | number,
   target: CellRange,

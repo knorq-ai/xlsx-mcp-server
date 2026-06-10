@@ -31,6 +31,7 @@ import {
   validateRangeSize,
   validateCellBounds,
   MAX_RANGE_CELLS,
+  MAX_READ_CELLS,
   columnNumberToLetter,
   columnLetterToNumber,
   getCellData,
@@ -130,6 +131,12 @@ export async function readSheet(
   const lines: string[] = [];
   lines.push(`Sheet: "${data.sheetName}" | Range: ${data.range}`);
   lines.push(`Total: ${data.totalRows} rows × ${data.totalColumns} columns`);
+  if (data.truncated) {
+    lines.push(
+      `⚠ Output truncated at row ${data.truncatedAtRow} (cell cap ${MAX_READ_CELLS.toLocaleString()}). ` +
+      `Use the 'range' parameter (e.g. 'A${(data.truncatedAtRow ?? 0) + 1}:...') to read the remaining rows.`,
+    );
+  }
   if (data.mergedCells && data.mergedCells.length > 0) {
     lines.push(`Merged cells: ${data.mergedCells.join(", ")}`);
   }
@@ -138,7 +145,9 @@ export async function readSheet(
   for (const row of data.data) {
     const cells = row.cells
       .map((c) => {
-        const val = c.formula ? `=${c.formula} → ${c.value}` : String(c.value ?? "");
+        const val = c.formula
+          ? `=${c.formula} → ${c.uncalculated ? "(not calculated)" : c.value}`
+          : String(c.value ?? "");
         let label = `${c.address}: ${val}`;
         if (c.mergeRange) label += ` [merged: ${c.mergeRange}]`;
         else if (c.mergedWith) label += ` [→${c.mergedWith}]`;
@@ -182,9 +191,10 @@ export async function readCell(
   const result = { ...data, style };
 
   const lines: string[] = [];
-  lines.push(`Cell ${data.address}: ${data.value ?? "(empty)"}`);
+  lines.push(`Cell ${data.address}: ${data.value ?? (data.uncalculated ? "(not calculated)" : "(empty)")}`);
   if (data.formula) lines.push(`Formula: =${data.formula}`);
   lines.push(`Type: ${data.type}`);
+  if (data.hyperlink) lines.push(`Hyperlink: ${data.hyperlink}`);
   if (data.mergeRange) lines.push(`Merge: master of ${data.mergeRange}`);
   if (data.mergedWith) lines.push(`Merge: part of ${data.mergedWith}`);
 
@@ -196,27 +206,43 @@ export async function searchCells(
   query: string,
   sheet?: string | number,
   caseSensitive: boolean = false,
+  maxResults: number = 100,
 ): Promise<string> {
   const handle = await openXlsx(filePath);
   const matches: SearchMatch[] = [];
+  // maxResults+1 件目まで集めて打ち切りの有無を検出する
+  const collectLimit = maxResults + 1;
 
   if (sheet !== undefined) {
     const ws = resolveSheet(handle.workbook, sheet);
-    matches.push(...searchInSheet(ws, query, caseSensitive));
+    matches.push(...searchInSheet(ws, query, caseSensitive, collectLimit));
   } else {
     for (const ws of handle.workbook.worksheets) {
-      matches.push(...searchInSheet(ws, query, caseSensitive));
+      if (matches.length >= collectLimit) break;
+      matches.push(...searchInSheet(ws, query, caseSensitive, collectLimit - matches.length));
     }
   }
 
+  const truncated = matches.length > maxResults;
+  const shown = truncated ? matches.slice(0, maxResults) : matches;
+
   const lines: string[] = [];
-  lines.push(`Found ${matches.length} match(es) for "${query}"`);
-  for (const m of matches) {
+  if (truncated) {
+    lines.push(
+      `Found ${maxResults}+ match(es) for "${query}" (output capped at ${maxResults}). ` +
+      `Narrow the query, specify a sheet, or raise max_results.`,
+    );
+  } else {
+    lines.push(`Found ${shown.length} match(es) for "${query}"`);
+  }
+  for (const m of shown) {
     const val = m.formula ? `=${m.formula} → ${m.value}` : String(m.value ?? "");
     lines.push(`  [${m.sheet}] ${m.address}: ${val}`);
   }
 
-  return lines.join("\n") + "\n\n<json>" + JSON.stringify({ matches }) + "</json>";
+  const payload: { matches: SearchMatch[]; truncated?: boolean } = { matches: shown };
+  if (truncated) payload.truncated = true;
+  return lines.join("\n") + "\n\n<json>" + JSON.stringify(payload) + "</json>";
 }
 
 export async function getSheetProperties(
@@ -475,7 +501,11 @@ export async function clearCells(
     for (let r = parsed.startRow; r <= parsed.endRow; r++) {
       const row = ws.getRow(r);
       for (let c = parsed.startCol; c <= parsed.endCol; c++) {
-        row.getCell(c).value = null;
+        const cell = row.getCell(c);
+        // 結合セルの子はスキップ（ExcelJS は子への代入をマスターに委譲するため、
+        // 範囲外のマスターを意図せずクリアしてしまう）
+        if (cell.isMerged && cell.master.address !== cell.address) continue;
+        cell.value = null;
         count++;
       }
     }
