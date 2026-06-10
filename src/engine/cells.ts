@@ -352,6 +352,10 @@ export function setCellValue(
     );
   }
 
+  // 共有数式マスターの上書きはどの値型でも保存を壊すため、分岐前に一括で
+  // 実体化する（null / {date} / {hyperlink} も対象）。
+  detachSharedFormulaGroupIfMaster(cell);
+
   if (value === null) {
     cell.value = null;
     return;
@@ -380,19 +384,16 @@ export function setCellValue(
 
   if (typeof value === "string") {
     if (value.startsWith("=")) {
-      detachSharedFormulaGroupIfMaster(cell);
       cell.value = { formula: value.slice(1) } as ExcelJS.CellFormulaValue;
       return;
     }
     // "'=" → リテラル文字列 "=..."（Excel と同じエスケープ規則）
     if (value.startsWith("'=")) {
-      detachSharedFormulaGroupIfMaster(cell);
       cell.value = value.slice(1);
       return;
     }
   }
 
-  detachSharedFormulaGroupIfMaster(cell);
   cell.value = value;
 }
 
@@ -521,7 +522,13 @@ export function readSheetData(
   const compact = options?.compact ?? false;
 
   const actualRowCount = ws.rowCount;
-  const actualColCount = ws.columnCount;
+  // ws.columnCount は「値を持つ行」のセル数しか見ないため、書式やノートだけの
+  // セルが最終値列より右にあると走査範囲から漏れる。定義済みセル数で広げる。
+  let actualColCount = ws.columnCount;
+  for (let r = 1; r <= actualRowCount; r++) {
+    const cc = ws.getRow(r).cellCount;
+    if (cc > actualColCount) actualColCount = cc;
+  }
 
   let startRow = 1;
   let endRow = actualRowCount;
@@ -587,10 +594,11 @@ export function readSheetData(
 
       // Compact mode: skip merged children and empty non-anchor cells.
       // 数式セルは結果未計算（value === null）でも省略しない — 省略すると
-      // LLM が空セルと誤認して数式を上書きする。
+      // LLM が空セルと誤認して数式を上書きする。ノート付き・書式付き
+      // （includeStyles 時）の空セルも保持する。
       if (compact) {
         if (cd.mergedWith) continue;
-        if (cd.value === null && !cd.formula && !cd.mergeRange) continue;
+        if (cd.value === null && !cd.formula && !cd.mergeRange && !cd.note && !cd.style) continue;
       }
 
       cells.push(cd);

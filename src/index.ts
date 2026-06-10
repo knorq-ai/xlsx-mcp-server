@@ -1075,7 +1075,8 @@ server.registerTool(
       destination: cellAddressSchema.describe("Top-left cell of the destination (e.g. 'E1')"),
       dest_sheet: sheetSchema.optional().describe("Destination sheet (defaults to the source sheet)"),
     },
-    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    // 重複領域コピーは再実行のたびに結果が変わるため idempotent ではない
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet, source_range, destination, dest_sheet }) => {
     try {
@@ -1174,6 +1175,10 @@ server.registerTool(
   },
   async ({ file_path, sheet, cell, note }) => {
     try {
+      // ノートも納品物に現れるコンテンツなので、テンプレートモードの
+      // ホワイトリストを適用する
+      assertCellCount(1, "set_cell_note", safetyConfig);
+      assertWithinTemplate(sheet, cellAddrToRange(cell), safetyConfig);
       const result = await setCellNote(file_path, sheet, cell, note);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {

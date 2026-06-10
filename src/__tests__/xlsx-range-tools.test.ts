@@ -401,10 +401,8 @@ describe("clear_cells modes", () => {
 
     const json = await readJson(p, 1, undefined, true);
     expect(json.cells.A1).toBeUndefined();
-    // 注意: read_sheet は常に compact 走査のため、値が空のセルは書式付きでも
-    // 出力から省略される（includeStyles でも見えない）。書式の保持確認は
-    // read_cell で行う。
-    expect(json.styles?.A1).toBeUndefined();
+    // 値が空でも書式付きセルは include_styles 時に styles マップへ現れる
+    expect(json.styles?.A1?.bold).toBe(true);
     const cellJson = JSON.parse(
       (await readCell(p, 1, "A1")).split("<json>")[1].split("</json>")[0],
     );

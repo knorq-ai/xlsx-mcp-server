@@ -147,7 +147,16 @@ export async function readSheet(
   // 出力トークンが約 2 倍になるため、テキスト部はサマリだけにする。
   const lines: string[] = [];
   lines.push(`Sheet: "${json.sheetName}" | Range: ${json.range}`);
-  lines.push(`Total: ${json.totalRows} rows × ${json.totalColumns} columns | ${Object.keys(json.cells).length + Object.keys(json.formulas ?? {}).length} non-empty cell(s) returned (data in the JSON block below; absent address = empty cell)`);
+  // dates / errors / sharedGroupMasters も値を持つ。アドレスの和集合で数える
+  // （sharedGroupMasters のキーは cells にも現れ得るため単純加算は二重計上になる）
+  const nonEmptyCount = new Set([
+    ...Object.keys(json.cells),
+    ...Object.keys(json.formulas ?? {}),
+    ...Object.keys(json.dates ?? {}),
+    ...Object.keys(json.errors ?? {}),
+    ...Object.keys(json.sharedGroupMasters ?? {}),
+  ]).size;
+  lines.push(`Total: ${json.totalRows} rows × ${json.totalColumns} columns | ${nonEmptyCount} non-empty cell(s) returned (data in the JSON block below; absent address = empty cell)`);
   if (json.truncated) {
     lines.push(
       `⚠ Output truncated at row ${json.truncatedAtRow} (cell cap ${MAX_READ_CELLS.toLocaleString()}). ` +
@@ -506,6 +515,15 @@ export async function clearCells(
         // 範囲外のマスターを意図せずクリアしてしまう）
         if (cell.isMerged && cell.master.address !== cell.address) continue;
         if (mode === "values" || mode === "all") {
+          // 共有数式マスターを直接 null にすると残されたスレーブが宙に浮き
+          // 保存が失敗するため、グループを実体化してからクリアする
+          const v = cell.value;
+          if (
+            typeof v === "object" && v !== null && "formula" in v &&
+            (v as { shareType?: string }).shareType === "shared"
+          ) {
+            materializeSharedFormulas(ws, cell.address);
+          }
           cell.value = null;
         }
         if (mode === "formats" || mode === "all") {
@@ -963,8 +981,13 @@ export async function copyRange(
     const colOffset = dst.col - src.startCol;
     validateCellBounds(src.endRow + rowOffset, src.endCol + colOffset);
 
-    // 共有数式を実体化してから扱う（スレーブのポインタはコピーできない）
+    // 共有数式を実体化してから扱う（スレーブのポインタはコピーできない）。
+    // コピー先シートも実体化する — コピーで共有数式マスターを上書きすると
+    // 残されたスレーブが宙に浮き、保存が失敗するため。
     materializeSharedFormulas(ws);
+    if (wsDest !== ws) {
+      materializeSharedFormulas(wsDest);
+    }
 
     // スナップショット（コピー元とコピー先が重なる場合に備えて先に全部読む）
     interface CellSnap {
@@ -1112,7 +1135,9 @@ export async function findReplace(
             regex.lastIndex = 0;
             if (regex.test(v)) {
               regex.lastIndex = 0;
-              next = v.replace(regex, replacement);
+              // 置換文字列は常にリテラル扱いにする（関数を渡さないと $& や
+              // $' などの JS 置換パターンが展開されてデータが壊れる）
+              next = v.replace(regex, () => replacement);
             }
           }
           if (next !== undefined && next !== v) {
@@ -1275,6 +1300,16 @@ export async function setCellNote(
       (c as unknown as { note: unknown }).note = undefined;
     } else {
       c.note = note;
+      // ExcelJS は値も書式も無いセルをシート XML に書き出さないため、
+      // 空セルのノートはファイル上で宙に浮き、次の保存で消える。
+      // 既定値と同じ alignment を明示して（見た目は不変、styleId は非ゼロ）
+      // セルをシリアライズ対象にする。
+      const isBareCell =
+        (c.value === null || c.value === undefined) &&
+        !summarizeCellStyle(c);
+      if (isBareCell) {
+        c.alignment = { vertical: "bottom" };
+      }
     }
     await saveXlsx(handle);
     return note === null ? `Removed note from ${cell}` : `Set note on ${cell}`;
