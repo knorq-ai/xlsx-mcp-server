@@ -37,6 +37,7 @@ import {
   getCellData,
   setCellValue,
   readSheetData,
+  toSheetJson,
   searchInSheet,
   rangeToString,
 } from "./engine/cells.js";
@@ -45,6 +46,7 @@ import {
   type CellFormatOptions,
   type CellFormatBulkGroup,
   applyCellFormat,
+  summarizeCellStyle,
 } from "./engine/formatting.js";
 import {
   addWorksheet,
@@ -122,42 +124,31 @@ export async function readSheet(
   filePath: string,
   sheet: string | number,
   range?: string,
-  compact?: boolean,
+  includeStyles?: boolean,
 ): Promise<string> {
   const handle = await openXlsx(filePath);
   const ws = resolveSheet(handle.workbook, sheet);
-  const data = readSheetData(ws, { range, compact });
+  // マップ形式（アドレスがキー）では空セル・結合子セルはキー不在で表現できる
+  // ため、常に compact で走査する。
+  const data = readSheetData(ws, { range, compact: true, includeStyles });
+  const json = toSheetJson(data);
 
+  // セルデータは <json> ブロックのみに載せる。テキスト部にも全セルを並べると
+  // 出力トークンが約 2 倍になるため、テキスト部はサマリだけにする。
   const lines: string[] = [];
-  lines.push(`Sheet: "${data.sheetName}" | Range: ${data.range}`);
-  lines.push(`Total: ${data.totalRows} rows × ${data.totalColumns} columns`);
-  if (data.truncated) {
+  lines.push(`Sheet: "${json.sheetName}" | Range: ${json.range}`);
+  lines.push(`Total: ${json.totalRows} rows × ${json.totalColumns} columns | ${Object.keys(json.cells).length + Object.keys(json.formulas ?? {}).length} non-empty cell(s) returned (data in the JSON block below; absent address = empty cell)`);
+  if (json.truncated) {
     lines.push(
-      `⚠ Output truncated at row ${data.truncatedAtRow} (cell cap ${MAX_READ_CELLS.toLocaleString()}). ` +
-      `Use the 'range' parameter (e.g. 'A${(data.truncatedAtRow ?? 0) + 1}:...') to read the remaining rows.`,
+      `⚠ Output truncated at row ${json.truncatedAtRow} (cell cap ${MAX_READ_CELLS.toLocaleString()}). ` +
+      `Use the 'range' parameter (e.g. 'A${(json.truncatedAtRow ?? 0) + 1}:...') to read the remaining rows.`,
     );
   }
-  if (data.mergedCells && data.mergedCells.length > 0) {
-    lines.push(`Merged cells: ${data.mergedCells.join(", ")}`);
-  }
-  lines.push("");
-
-  for (const row of data.data) {
-    const cells = row.cells
-      .map((c) => {
-        const val = c.formula
-          ? `=${c.formula} → ${c.uncalculated ? "(not calculated)" : c.value}`
-          : String(c.value ?? "");
-        let label = `${c.address}: ${val}`;
-        if (c.mergeRange) label += ` [merged: ${c.mergeRange}]`;
-        else if (c.mergedWith) label += ` [→${c.mergedWith}]`;
-        return label;
-      })
-      .join(" | ");
-    lines.push(`Row ${row.row}: ${cells}`);
+  if (json.mergedCells && json.mergedCells.length > 0) {
+    lines.push(`Merged cells in range: ${json.mergedCells.join(", ")}`);
   }
 
-  return lines.join("\n") + "\n\n<json>" + JSON.stringify(data) + "</json>";
+  return lines.join("\n") + "\n\n<json>" + JSON.stringify(json) + "</json>";
 }
 
 export async function readCell(
@@ -180,15 +171,11 @@ export async function readCell(
     }
   }
 
-  // Include style info
-  const style: Record<string, unknown> = {};
-  if (c.font) style.font = c.font;
-  if (c.fill && (c.fill as ExcelJS.FillPattern).fgColor) style.fill = c.fill;
-  if (c.border) style.border = c.border;
-  if (c.alignment) style.alignment = c.alignment;
-  if (c.numFmt) style.numFmt = c.numFmt;
-
-  const result = { ...data, style };
+  // 書式は format_cells が受け取る形式（CellFormatOptions）に要約して返す。
+  // ExcelJS の生 style オブジェクトより大幅に小さく、そのまま format_cells に
+  // 渡して書式を複製できる。
+  const style = summarizeCellStyle(c);
+  const result = style ? { ...data, style } : data;
 
   const lines: string[] = [];
   lines.push(`Cell ${data.address}: ${data.value ?? (data.uncalculated ? "(not calculated)" : "(empty)")}`);

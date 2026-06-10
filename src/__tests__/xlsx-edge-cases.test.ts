@@ -226,10 +226,10 @@ describe("border false handling", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.border.top.style).toBe("thin");
-    expect(json.style.border.bottom).toBeUndefined();
-    expect(json.style.border.left).toBeUndefined();
-    expect(json.style.border.right).toBeUndefined();
+    expect(json.style.borderTop).toBe(true);
+    expect(json.style.borderBottom).toBeUndefined();
+    expect(json.style.borderLeft).toBeUndefined();
+    expect(json.style.borderRight).toBeUndefined();
   });
 });
 
@@ -245,8 +245,8 @@ describe("formatting edge cases", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.font.italic).toBe(true);
-    expect(json.style.font.color.argb).toBe("FFFF0000");
+    expect(json.style.italic).toBe(true);
+    expect(json.style.fontColor).toBe("FF0000");
   });
 
   it("applies underline and strikethrough", async () => {
@@ -256,8 +256,8 @@ describe("formatting edge cases", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.font.underline).toBe(true);
-    expect(json.style.font.strike).toBe(true);
+    expect(json.style.underline).toBe(true);
+    expect(json.style.strikethrough).toBe(true);
   });
 });
 

@@ -166,18 +166,18 @@ server.registerTool(
 server.registerTool(
   "read_sheet",
   {
-    description: "Read cell data from a sheet (values, formulas, types). Optionally specify a range like 'A1:C10'. Use compact=true to omit empty cells and merged-cell children for token-efficient output. Output is capped at 5,000 cells — large sheets are truncated with a notice; read them in chunks via 'range'.",
+    description: "Read cell data from a sheet as JSON maps keyed by cell address: 'cells' (plain values), 'formulas' ({f, v}), 'dates', 'errors', 'notes', 'mergedCells'. An absent address means an empty cell. Optionally specify a range like 'A1:C10'. Output is capped at 5,000 cells — large sheets are truncated with a notice; read them in chunks via 'range'. Set include_styles=true to also get per-cell formatting in the same shape format_cells accepts.",
     inputSchema: {
       file_path: filePathSchema,
       sheet: sheetSchema,
       range: z.string().optional().describe("Cell range to read (e.g. 'A1:C10'). Omit to read all data."),
-      compact: z.boolean().optional().default(false).describe("Omit empty cells and merged-cell children. Reduces output for sheets with many merged cells."),
+      include_styles: z.boolean().optional().default(false).describe("Include per-cell formatting (format_cells vocabulary). Increases output size."),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
-  async ({ file_path, sheet, range, compact }) => {
+  async ({ file_path, sheet, range, include_styles }) => {
     try {
-      const result = await readSheet(file_path, sheet, range, compact);
+      const result = await readSheet(file_path, sheet, range, include_styles);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };

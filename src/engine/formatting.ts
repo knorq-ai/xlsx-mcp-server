@@ -145,3 +145,85 @@ export function applyCellFormat(
     cell.numFmt = opts.numFmt;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Style read-back
+// ---------------------------------------------------------------------------
+
+const BORDER_STYLES = ["thin", "medium", "thick", "double", "dotted", "dashed"] as const;
+const H_ALIGN = ["left", "center", "right", "justify"] as const;
+const V_ALIGN = ["top", "middle", "bottom"] as const;
+
+function argbToHex(color: Partial<ExcelJS.Color> | undefined): string | undefined {
+  const argb = color?.argb;
+  if (!argb) return undefined;
+  return argb.length === 8 ? argb.slice(2) : argb;
+}
+
+/**
+ * セルの書式を CellFormatOptions（format_cells が受け取る形式）に要約する。
+ * 読み取った書式をそのまま format_cells に渡して複製できるようにするための
+ * 読み書き対称な表現。書式が何もなければ undefined。
+ */
+export function summarizeCellStyle(cell: ExcelJS.Cell): CellFormatOptions | undefined {
+  const out: CellFormatOptions = {};
+
+  const f = cell.font;
+  if (f) {
+    if (f.bold) out.bold = true;
+    if (f.italic) out.italic = true;
+    if (f.underline) out.underline = true;
+    if (f.strike) out.strikethrough = true;
+    if (f.name) out.fontName = f.name;
+    if (f.size) out.fontSize = f.size;
+    const fc = argbToHex(f.color);
+    if (fc) out.fontColor = fc;
+  }
+
+  const fill = cell.fill as ExcelJS.FillPattern | undefined;
+  if (fill && fill.type === "pattern" && fill.pattern && fill.pattern !== "none") {
+    const bg = argbToHex(fill.fgColor);
+    if (bg) out.fillColor = bg;
+  }
+
+  const b = cell.border;
+  if (b) {
+    const sides: Array<[keyof ExcelJS.Borders, "borderTop" | "borderBottom" | "borderLeft" | "borderRight"]> = [
+      ["top", "borderTop"],
+      ["bottom", "borderBottom"],
+      ["left", "borderLeft"],
+      ["right", "borderRight"],
+    ];
+    for (const [side, flag] of sides) {
+      const def = b[side] as Partial<ExcelJS.Border> | undefined;
+      if (def?.style) {
+        out[flag] = true;
+        if (!out.borderStyle && (BORDER_STYLES as readonly string[]).includes(def.style)) {
+          out.borderStyle = def.style as CellFormatOptions["borderStyle"];
+        }
+        if (!out.borderColor) {
+          const bc = argbToHex(def.color as Partial<ExcelJS.Color> | undefined);
+          if (bc) out.borderColor = bc;
+        }
+      }
+    }
+  }
+
+  const a = cell.alignment;
+  if (a) {
+    if (a.horizontal && (H_ALIGN as readonly string[]).includes(a.horizontal)) {
+      out.horizontalAlignment = a.horizontal as CellFormatOptions["horizontalAlignment"];
+    }
+    if (a.vertical && (V_ALIGN as readonly string[]).includes(a.vertical)) {
+      out.verticalAlignment = a.vertical as CellFormatOptions["verticalAlignment"];
+    }
+    if (a.wrapText) out.wrapText = true;
+    if (typeof a.textRotation === "number" && a.textRotation !== 0) {
+      out.textRotation = a.textRotation;
+    }
+  }
+
+  if (cell.numFmt) out.numFmt = cell.numFmt;
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}

@@ -6,6 +6,7 @@
 
 import ExcelJS from "exceljs";
 import { ErrorCode, EngineError } from "./xlsx-io.js";
+import { summarizeCellStyle, type CellFormatOptions } from "./formatting.js";
 
 // ---------------------------------------------------------------------------
 // A1 notation helpers
@@ -176,6 +177,20 @@ export interface CellData {
    * Never reported in `formula`.
    */
   sharedGroupMaster?: string;
+  /** Cell formatting in format_cells vocabulary (only when includeStyles) */
+  style?: CellFormatOptions;
+  /** Cell note (comment) text */
+  note?: string;
+}
+
+/** ExcelJS の note（string または richText オブジェクト）をプレーン文字列にする */
+export function flattenNote(note: unknown): string | undefined {
+  if (typeof note === "string") return note;
+  if (typeof note === "object" && note !== null && "texts" in note) {
+    const texts = (note as { texts: Array<{ text: string }> }).texts;
+    if (Array.isArray(texts)) return texts.map((t) => t.text).join("");
+  }
+  return undefined;
 }
 
 /** 数式のキャッシュ済み結果を CellData.value 用に正規化する */
@@ -199,6 +214,9 @@ export function getCellData(cell: ExcelJS.Cell): CellData {
     value: null,
     type: "null",
   };
+
+  const note = flattenNote(cell.note);
+  if (note) result.note = note;
 
   // Merge info
   if (cell.isMerged) {
@@ -481,6 +499,8 @@ export interface ReadSheetOptions {
   range?: string;
   /** Compact mode: omit merged children and empty cells to reduce output size */
   compact?: boolean;
+  /** Include per-cell style (format_cells vocabulary) in the output */
+  includeStyles?: boolean;
 }
 
 /**
@@ -560,6 +580,10 @@ export function readSheetData(
       if (mr) {
         cd.mergeRange = mr;
       }
+      if (options?.includeStyles && !cd.mergedWith) {
+        const style = summarizeCellStyle(cell);
+        if (style) cd.style = style;
+      }
 
       // Compact mode: skip merged children and empty non-anchor cells.
       // 数式セルは結果未計算（value === null）でも省略しない — 省略すると
@@ -612,6 +636,96 @@ export function readSheetData(
     result.truncatedAtRow = truncatedAtRow;
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Compact JSON encoding for read_sheet
+// ---------------------------------------------------------------------------
+
+/**
+ * read_sheet の <json> ペイロード。アドレスをキーにした密なマップ形式。
+ * セルの型は JSON 値の型から自明（文字列/数値/真偽値）。空セルはキーが無い。
+ * 数式・日付・エラーは別マップに分離して曖昧さを無くす。
+ */
+export interface SheetJson {
+  sheetName: string;
+  range: string;
+  totalRows: number;
+  totalColumns: number;
+  /** プレーン値（文字列・数値・真偽値）。richText/hyperlink はテキストを載せる */
+  cells: Record<string, string | number | boolean>;
+  /** 数式セル。f = 数式（= なし）、v = キャッシュ済み結果（未計算なら省略） */
+  formulas?: Record<string, { f: string; v?: unknown }>;
+  /** 日付セル（ISO 8601） */
+  dates?: Record<string, string>;
+  /** エラーセル（"#DIV/0!" など） */
+  errors?: Record<string, string>;
+  /** ハイパーリンク（アドレス → URL。表示テキストは cells 側） */
+  hyperlinks?: Record<string, string>;
+  /** 数値書式（設定されているセルのみ） */
+  numFmts?: Record<string, string>;
+  /** セルノート（コメント） */
+  notes?: Record<string, string>;
+  /** includeStyles 時のみ。format_cells と同じ形式 */
+  styles?: Record<string, CellFormatOptions>;
+  /** 劣化した共有数式グループ（アドレス → マスターアドレス） */
+  sharedGroupMasters?: Record<string, string>;
+  /** 読み取り範囲と交差する結合セル範囲 */
+  mergedCells?: string[];
+  /** セル数上限で打ち切られた場合 true。range 指定で続きを読める */
+  truncated?: boolean;
+  truncatedAtRow?: number;
+}
+
+/** SheetData（行ベース内部表現） → SheetJson（マップ形式） */
+export function toSheetJson(data: SheetData): SheetJson {
+  const out: SheetJson = {
+    sheetName: data.sheetName,
+    range: data.range,
+    totalRows: data.totalRows,
+    totalColumns: data.totalColumns,
+    cells: {},
+  };
+  const put = <T>(key: keyof SheetJson, addr: string, value: T): void => {
+    const target = out as unknown as Record<string, Record<string, T>>;
+    const map = target[key] ?? {};
+    map[addr] = value;
+    target[key] = map;
+  };
+
+  for (const row of data.data) {
+    for (const c of row.cells) {
+      if (c.mergedWith) continue;
+      const addr = c.address;
+
+      if (c.formula !== undefined) {
+        const entry: { f: string; v?: unknown } = { f: c.formula };
+        if (!c.uncalculated) entry.v = c.value;
+        put("formulas", addr, entry);
+      } else if (c.sharedGroupMaster !== undefined) {
+        put("sharedGroupMasters", addr, c.sharedGroupMaster);
+        if (c.value !== null) out.cells[addr] = c.value as string | number | boolean;
+      } else if (c.type === "date") {
+        put("dates", addr, c.value as string);
+      } else if (c.type === "error") {
+        put("errors", addr, String(c.value));
+      } else if (c.value !== null && c.value !== undefined) {
+        out.cells[addr] = c.value as string | number | boolean;
+      }
+
+      if (c.hyperlink) put("hyperlinks", addr, c.hyperlink);
+      if (c.numFmt) put("numFmts", addr, c.numFmt);
+      if (c.note) put("notes", addr, c.note);
+      if (c.style) put("styles", addr, c.style);
+    }
+  }
+
+  if (data.mergedCells && data.mergedCells.length > 0) out.mergedCells = data.mergedCells;
+  if (data.truncated) {
+    out.truncated = true;
+    out.truncatedAtRow = data.truncatedAtRow;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
