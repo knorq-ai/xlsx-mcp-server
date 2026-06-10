@@ -1350,7 +1350,14 @@ export async function setRowVisibility(
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
     for (let r = startRow; r <= endRow; r++) {
-      ws.getRow(r).hidden = hidden;
+      const row = ws.getRow(r);
+      row.hidden = hidden;
+      // ExcelJS はセルも明示的な高さも無い行をシリアライズしない
+      // （hidden フラグだけでは保存時に消える）ため、空行を隠す場合は
+      // 既定の行高を明示してシリアライズ対象にする。
+      if (hidden && row.actualCellCount === 0 && !row.height) {
+        row.height = ws.properties?.defaultRowHeight || 15;
+      }
     }
     await saveXlsx(handle);
     return `${hidden ? "Hid" : "Unhid"} rows ${startRow}-${endRow}`;
