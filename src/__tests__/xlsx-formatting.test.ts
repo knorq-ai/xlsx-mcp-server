@@ -20,8 +20,8 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.font.bold).toBe(true);
-    expect(json.style.font.size).toBe(16);
+    expect(json.style.bold).toBe(true);
+    expect(json.style.fontSize).toBe(16);
   });
 
   it("applies fill color", async () => {
@@ -31,7 +31,7 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "B2");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.fill.fgColor.argb).toBe("FFFFFF00");
+    expect(json.style.fillColor).toBe("FFFF00");
   });
 
   it("applies borders", async () => {
@@ -41,8 +41,8 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.border.top.style).toBe("thin");
-    expect(json.style.border.bottom.style).toBe("thin");
+    expect(json.style.borderTop).toBe(true);
+    expect(json.style.borderBottom).toBe(true);
   });
 
   it("applies alignment", async () => {
@@ -56,9 +56,9 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.alignment.horizontal).toBe("center");
-    expect(json.style.alignment.vertical).toBe("middle");
-    expect(json.style.alignment.wrapText).toBe(true);
+    expect(json.style.horizontalAlignment).toBe("center");
+    expect(json.style.verticalAlignment).toBe("middle");
+    expect(json.style.wrapText).toBe(true);
   });
 
   it("applies number format", async () => {
@@ -89,7 +89,7 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.font.color.argb).toBe("FFFF0000");
+    expect(json.style.fontColor).toBe("FF0000");
   });
 
   it("applies font name", async () => {
@@ -99,7 +99,7 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.font.name).toBe("Courier New");
+    expect(json.style.fontName).toBe("Courier New");
   });
 
   it("applies text rotation", async () => {
@@ -109,7 +109,7 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.alignment.textRotation).toBe(45);
+    expect(json.style.textRotation).toBe(45);
   });
 
   it("applies border to specific sides only", async () => {
@@ -125,10 +125,11 @@ describe("format_cells", () => {
 
     const result = await readCell(p, 1, "A1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.style.border.top.style).toBe("medium");
-    expect(json.style.border.bottom.style).toBe("medium");
-    expect(json.style.border.left).toBeUndefined();
-    expect(json.style.border.right).toBeUndefined();
+    expect(json.style.borderTop).toBe(true);
+    expect(json.style.borderBottom).toBe(true);
+    expect(json.style.borderStyle).toBe("medium");
+    expect(json.style.borderLeft).toBeUndefined();
+    expect(json.style.borderRight).toBeUndefined();
   });
 });
 
@@ -145,7 +146,7 @@ describe("format_cells_bulk", () => {
 
     const h = await readCell(p, 1, "A1");
     const hJson = JSON.parse(h.split("<json>")[1].split("</json>")[0]);
-    expect(hJson.style.font.bold).toBe(true);
+    expect(hJson.style.bold).toBe(true);
 
     const d = await readCell(p, 1, "A2");
     const dJson = JSON.parse(d.split("<json>")[1].split("</json>")[0]);

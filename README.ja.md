@@ -4,18 +4,19 @@
 
 Excel (.xlsx) ファイルの読み取り・編集を行うローカル [MCP](https://modelcontextprotocol.io/) サーバ。Claude Code、Cursor、その他 MCP 対応クライアントで動作する。
 
-セルデータ、書式設定、数式、シート管理、行列操作、データ入力規則、名前付き範囲、セル結合をカバーする **37 ツール** を提供。すべて stdio 経由でローカル実行され、ファイルのアップロードは不要である。
+セルデータ、書式設定、数式、範囲コピー・ソート・置換、シート管理、行列操作、データ入力規則、名前付き範囲、セル結合、セルノート、シート保護、ページ設定をカバーする **47 ツール** を提供。すべて stdio 経由でローカル実行され、ファイルのアップロードは不要である。
 
 ## 機能一覧
 
 | カテゴリ | ツール |
 |---|---|
 | **読み取り** | `get_workbook_info`, `read_sheet`, `read_cell`, `search_cells`, `get_sheet_properties`, `list_named_ranges`, `list_data_validations`, `list_images` |
-| **書き込み** | `write_cell`, `write_cells`, `write_row`, `write_rows`, `clear_cells`, `create_workbook` |
+| **書き込み** | `write_cell`, `write_cells`, `write_row`, `write_rows`, `clear_cells`, `set_cell_note`, `create_workbook` |
+| **範囲操作** | `copy_range`, `find_replace`, `sort_range` |
 | **書式** | `format_cells`, `format_cells_bulk` |
-| **行・列** | `set_column_width`, `set_column_widths`, `set_row_height`, `set_row_heights`, `insert_rows`, `delete_rows`, `insert_columns`, `delete_columns` |
-| **シート操作** | `add_sheet`, `rename_sheet`, `delete_sheet`, `copy_sheet` |
-| **表示設定** | `set_freeze_panes`, `set_auto_filter`, `remove_auto_filter` |
+| **行・列** | `set_column_width`, `set_column_widths`, `set_row_height`, `set_row_heights`, `insert_rows`, `delete_rows`, `insert_columns`, `delete_columns`, `set_row_visibility`, `set_column_visibility` |
+| **シート操作** | `add_sheet`, `rename_sheet`, `delete_sheet`, `copy_sheet`, `set_sheet_properties`, `protect_sheet`, `unprotect_sheet` |
+| **表示・レイアウト** | `set_freeze_panes`, `set_auto_filter`, `remove_auto_filter`, `set_page_setup` |
 | **入力規則** | `add_data_validation`, `remove_data_validation` |
 | **構造** | `add_named_range`, `delete_named_range`, `merge_cells`, `unmerge_cells` |
 
@@ -32,7 +33,33 @@ write_cell  →  value: "=SUM(A1:A10)"
 write_cells →  cells: [{cell: "B1", value: "=A1*2"}, {cell: "B2", value: "=VLOOKUP(...)"}]
 ```
 
-`read_cell` は数式とキャッシュされた計算結果の両方を返す。
+`read_cell` は数式とキャッシュされた計算結果の両方を返す。`=` で始まる文字列をそのまま書き込みたい場合は先頭にシングルクォートを付ける（`'=text` は文字列 `=text` として書き込まれる — Excel のエスケープ規則と同じ）。編集時に数式は再計算されないが、保存のたびに「開いたときに再計算」フラグが有効化されるため、Excel で開けばすべて再計算される。
+
+### 日付・ハイパーリンク値
+
+すべての書き込みツールで、オブジェクト形式の値により真の Excel 日付とハイパーリンクを書き込める:
+
+```
+write_cell →  value: {date: "2024-01-15"}                            // 真の Excel 日付セル
+write_cell →  value: {hyperlink: "https://example.com", text: "Docs"} // 表示テキスト付きリンク
+```
+
+### read_sheet の JSON 形式
+
+`read_sheet` はセルデータをアドレスキーのマップとして `<json>...</json>` ブロックで返す。アドレスが存在しない場合は空セルを意味する:
+
+```json
+{
+  "sheetName": "Sheet1",
+  "range": "A1:C3",
+  "cells": {"A1": "Product", "B1": "Price", "A2": "Widget", "B2": 9.99},
+  "formulas": {"C2": {"f": "B2*2", "v": 19.98}},
+  "dates": {"A3": "2024-01-15T00:00:00.000Z"},
+  "mergedCells": ["A1:B1"]
+}
+```
+
+追加のマップ（`errors`, `hyperlinks`, `numFmts`, `notes`、および `include_styles: true` 指定時の `styles`（`format_cells` と同じ語彙））は該当データがある場合のみ出現する。出力は 5,000 セルで打ち切られ、打ち切り時は `truncated: true` が付くため、大きいシートは `range` で分割して読むこと。
 
 ## クイックスタート
 
@@ -167,19 +194,19 @@ npm link
 file_path
 ```
 
-**`read_sheet`** — シートのセルデータを読み取る。範囲指定可能。
+**`read_sheet`** — シートのセルデータをアドレスキーの JSON マップとして読み取る（[read_sheet の JSON 形式](#read_sheet-の-json-形式) を参照）。出力は 5,000 セル上限。
 ```
-file_path, sheet, range?
+file_path, sheet, range?, include_styles?
 ```
 
-**`read_cell`** — 単一セルの値、数式、型、書式情報。
+**`read_cell`** — 単一セルの値、数式、型、書式情報。書式は `format_cells` が受け付けるのと同じ語彙（`bold`, `fillColor` 等）で返されるため、読み取った書式をそのまま書き戻せる。
 ```
 file_path, sheet, cell
 ```
 
 **`search_cells`** — セル全体からテキストまたは数値を検索する。
 ```
-file_path, query, sheet?, case_sensitive?
+file_path, query, sheet?, case_sensitive?, max_results?
 ```
 
 **`get_sheet_properties`** — シートの状態、サイズ、ウィンドウ枠固定、オートフィルタ、タブ色。
@@ -204,7 +231,7 @@ file_path, sheet
 
 ### セル書き込み
 
-**`write_cell`** — セルの値または数式を設定する。`=` で始めると数式になる。
+**`write_cell`** — セルの値または数式を設定する。`=` で始めると数式になる。日付は `{date: "ISO"}`、リンクは `{hyperlink, text}` を使う。
 ```
 file_path, sheet, cell, value
 ```
@@ -224,14 +251,36 @@ file_path, sheet, row, values, start_column?
 file_path, sheet, start_row, rows (2 次元配列), start_column?
 ```
 
-**`clear_cells`** — 範囲内のセル値をクリアする（書式は保持）。
+**`clear_cells`** — 範囲内のセル値・書式をクリアする。`mode: "values"`（デフォルト）は書式を保持、`"formats"` は値を保持、`"all"` は両方クリアする。
 ```
-file_path, sheet, range
+file_path, sheet, range, mode?
+```
+
+**`set_cell_note`** — セルノート（コメント）を設定または削除する。`null` を渡すと削除。
+```
+file_path, sheet, cell, note
 ```
 
 **`create_workbook`** — 新しい空の .xlsx ワークブックを作成する。
 ```
 file_path, sheet_name?
+```
+
+### 範囲操作
+
+**`copy_range`** — 範囲（値・数式・書式・結合）を別の場所へコピーする。別シートへのコピーも可能。数式内の相対参照はコピー先に合わせてシフトされ、`$` 付きの絶対参照は固定のまま。
+```
+file_path, sheet, source_range, destination, dest_sheet?
+```
+
+**`find_replace`** — プレーン文字列セルを対象に一括置換する。数式・数値・リッチテキスト・ハイパーリンクは変更されない。シート未指定時は全シートを対象とする。
+```
+file_path, query, replacement, sheet?, case_sensitive?, match_entire_cell?
+```
+
+**`sort_range`** — 範囲の行をキー列でソートする。値・数式・書式は行と一緒に移動し、数式内の相対参照は再アンカーされる。範囲が結合セルと交差する場合は失敗する。
+```
+file_path, sheet, range, key_column, ascending?, has_header?
 ```
 
 ### 書式設定
@@ -268,9 +317,9 @@ file_path, sheet, row, height
 file_path, sheet, rows ({row, height} の配列)
 ```
 
-**`insert_rows`** — 指定位置に空の行を挿入する。
+**`insert_rows`** — 指定位置に空の行を挿入する。`inherit_style: true` で直上の行から書式（と行高）を引き継ぐ。
 ```
-file_path, sheet, row, count
+file_path, sheet, row, count, inherit_style?
 ```
 
 **`delete_rows`** — 指定位置の行を削除する。
@@ -286,6 +335,16 @@ file_path, sheet, column, count
 **`delete_columns`** — 指定位置の列を削除する。
 ```
 file_path, sheet, column, count
+```
+
+**`set_row_visibility`** — 行範囲を非表示または再表示する。
+```
+file_path, sheet, start_row, end_row, hidden
+```
+
+**`set_column_visibility`** — 列範囲を非表示または再表示する。
+```
+file_path, sheet, start_column, end_column, hidden
 ```
 
 ### シート操作
@@ -310,11 +369,26 @@ file_path, sheet
 file_path, source_sheet, new_name
 ```
 
-### 表示設定
-
-**`set_freeze_panes`** — 行・列のウィンドウ枠を固定する。0 を指定すると解除。
+**`set_sheet_properties`** — シートの表示状態（`visible` / `hidden` / `veryHidden`）とタブ色を設定する。ワークブックには最低 1 枚の表示シートが必要。
 ```
-file_path, sheet, row, column
+file_path, sheet, state?, tab_color?
+```
+
+**`protect_sheet`** — Excel 上での編集からシートを保護する（パスワード指定可）。これは Excel UI レベルの保護であり暗号化ではない — 本サーバや他のツールからはファイルを変更できる。
+```
+file_path, sheet, password?
+```
+
+**`unprotect_sheet`** — シート保護を解除する。
+```
+file_path, sheet
+```
+
+### 表示・レイアウト
+
+**`set_freeze_panes`** — 行・列のウィンドウ枠を固定する。両方に 0 を指定すると解除。
+```
+file_path, sheet, freeze_rows, freeze_columns
 ```
 
 **`set_auto_filter`** — 範囲にオートフィルタを有効にする。
@@ -325,6 +399,11 @@ file_path, sheet, range
 **`remove_auto_filter`** — シートからオートフィルタを解除する。
 ```
 file_path, sheet
+```
+
+**`set_page_setup`** — 印刷 / PDF レイアウトを設定する: 用紙の向き、印刷範囲、ページに合わせる、用紙サイズ。
+```
+file_path, sheet, orientation?, print_area?, fit_to_width?, fit_to_height?, paper_size?
 ```
 
 ### データ入力規則
@@ -365,22 +444,41 @@ file_path, sheet, range
 
 ## 既知の制限事項
 
-### 非対応機能（Python/openpyxl/xlwings で代替すること）
+### 破壊または拒否される機能
+
+| 機能 | 挙動 |
+|------|------|
+| **グラフ・ピボットテーブル・スライサー** | **書き込み操作で破壊される。** 読み取りは安全だが、ファイルを保存するツールを実行するとワークブックから消える。グラフ・ピボットを残す必要があるワークブックは編集しないこと。 |
+| **VBA マクロ (.xlsm/.xltm)** | **読み取り専用。** 保存すると VBA プロジェクトが暗黙に破壊されるため、書き込みは拒否される。 |
+
+### 非対応機能
 
 | 機能 | 詳細 |
 |------|------|
-| **数式の再計算** | キャッシュされた計算結果は読み取れるが、値を変更しても数式は再計算されない。再計算には Excel で開く必要がある。 |
-| **グラフ** | グラフの読み取り・作成・編集はできない。保存時に既存のグラフは保持される。 |
-| **ピボットテーブル** | ピボットテーブルの読み取り・作成はできない |
-| **条件付き書式** | 条件付き書式ルールの読み取り・作成はできない |
-| **VBA/マクロ** | マクロ有効ブック (.xlsm) はサポートされていない |
-| **数式参照の自動更新** | 行・列の挿入/削除時に既存数式のセル参照は自動シフトされない（例: `=SUM(A1:A10)` は行挿入後もそのまま） |
+| **数式の再計算** | 編集時に数式は評価されない。キャッシュされた計算結果は読み取れるが、キャッシュのない数式セルは `(not calculated)` と読める。保存のたびに「開いたときに再計算」が有効化されるため、Excel で開けば再計算される。 |
+| **条件付き書式** | 既存のルールは保存時に保持されるが、読み取り・編集するツールはない。 |
+| **数式参照の自動更新** | 行・列の挿入/削除時に数式テキスト内のセル参照は自動シフトされない（例: `=SUM(A1:A10)` は行挿入後もそのまま）。結合セルとデータ入力規則は正しくシフトされる。構造変更は数式の書き込み前に行うこと。 |
 
 ### その他の制限
 
 - **copy_sheet は部分的** — セル値、スタイル、列幅、行高、結合セルをコピーする。データ入力規則、条件付き書式、表示設定はコピーされない
-- **範囲サイズ制限** — 書き込み・書式・データ検証ツールは 100,000 セルを超える範囲を拒否する
+- **範囲サイズ制限** — 書き込み・書式・データ検証ツールは 100,000 セルを超える範囲を拒否する（`XLSX_MAX_CELLS_PER_CALL` で下げられる）
 - **ファイルサイズ制限** — 100 MB を超えるファイルは開けない
+
+## 安全性と信頼性
+
+- **アトミック保存** — 一時ファイルへの書き込み + リネームで保存するため、保存中のクラッシュでワークブックが破損することはない。
+- **プロセス間書き込みロック** — `<file>.mcplock` のアドバイザリロック（孤児ロック検出付き）により、プロセス内の直列化に加えて複数サーバインスタンス間でも書き込みが直列化される。
+
+### 環境変数
+
+サーバ起動時に一度だけ読み込まれるため、ツールパラメータからは上書きできない。
+
+| 変数 | 効果 |
+|------|------|
+| `XLSX_MAX_CELLS_PER_CALL` | 1 回のツール呼び出しで触れるセル数の上限。デフォルト 100,000。デプロイ側で下げられる。 |
+| `XLSX_TEMPLATE_MODE=1` + `XLSX_TEMPLATE_RANGES=Sheet1!A1:D10,Sheet1!F2:F100` | テンプレートモード: すべての書き込み・書式・クリアは宣言された範囲内に収まる必要があり、範囲外は `OUTSIDE_TEMPLATE_RANGE` で拒否される。構造操作（行・列の挿入/削除、シートの削除/名前変更）と `find_replace` もブロックされる。 |
+| `XLSX_BACKUP_ON_WRITE=1` | 保存のたびにワークブックを `<file>.bak` へコピーする。 |
 
 ## なぜ Raw Python ではなく MCP ツールか？
 

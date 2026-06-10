@@ -3,6 +3,7 @@
  */
 
 import * as fs from "fs/promises";
+import * as path from "path";
 import ExcelJS from "exceljs";
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,13 @@ if (typeof _origParseMergeCells === "function") {
       }
     }
   };
+} else {
+  // ExcelJS 内部が変わってパッチが当たらない場合に黙って劣化しないよう警告する
+  // （stdout は MCP のプロトコルチャネルなので stderr に出す）
+  console.error(
+    "[xlsx-mcp-server] WARNING: ExcelJS Worksheet._parseMergeCells not found — " +
+      "duplicate-merge tolerance patch is inactive. Files with overlapping merges may fail to open.",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +76,7 @@ export const ErrorCode = {
   INVALID_PARAMETER: "INVALID_PARAMETER",
   MAX_CELLS_EXCEEDED: "MAX_CELLS_EXCEEDED",
   OUTSIDE_TEMPLATE_RANGE: "OUTSIDE_TEMPLATE_RANGE",
+  FILE_LOCKED: "FILE_LOCKED",
 } as const;
 
 export type ErrorCodeType = (typeof ErrorCode)[keyof typeof ErrorCode];
@@ -127,9 +136,53 @@ export async function openXlsx(filePath: string): Promise<XlsxHandle> {
 
 /**
  * Workbook をファイルに保存する。
+ *
+ * 同一ディレクトリの一時ファイルに書いてから rename するため、
+ * 書き込み途中のクラッシュで元のワークブックが破壊されることはない。
+ * fullCalcOnLoad を立てるのは、このサーバの編集が依存数式のキャッシュ済み
+ * 結果を無効化しても再計算できないため（Excel が開いたときに再計算させる）。
  */
+/**
+ * XLSX_BACKUP_ON_WRITE=1 で、保存前に既存ファイルを `<file>.bak` へコピーする
+ * （直近 1 世代のみ。LLM がツールパラメータで無効化できないよう env で制御）。
+ */
+const BACKUP_ON_WRITE = (() => {
+  const v = (process.env.XLSX_BACKUP_ON_WRITE ?? "").toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+})();
+
 export async function saveXlsx(handle: XlsxHandle): Promise<void> {
-  await handle.workbook.xlsx.writeFile(handle.filePath);
+  const ext = path.extname(handle.filePath).toLowerCase();
+  if (ext === ".xlsm" || ext === ".xltm") {
+    throw new EngineError(
+      ErrorCode.INVALID_PARAMETER,
+      `Writing to macro-enabled workbooks (${ext}) is not supported: ExcelJS cannot ` +
+        `preserve VBA projects, so saving would silently destroy all macros. ` +
+        `The file is readable; to edit it, copy it to .xlsx first.`,
+    );
+  }
+  if (BACKUP_ON_WRITE) {
+    try {
+      await fs.copyFile(handle.filePath, handle.filePath + ".bak");
+    } catch (e) {
+      // 新規ファイル（コピー元なし）は無視。それ以外の失敗はバックアップ保証を
+      // 守るため保存自体を中断する。
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+  }
+  handle.workbook.calcProperties.fullCalcOnLoad = true;
+  const dir = path.dirname(handle.filePath);
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(handle.filePath)}.tmp-${process.pid}-${Date.now()}`,
+  );
+  try {
+    await handle.workbook.xlsx.writeFile(tmpPath);
+    await fs.rename(tmpPath, handle.filePath);
+  } catch (e) {
+    await fs.unlink(tmpPath).catch(() => {});
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,9 +214,13 @@ export function resolveSheet(
   }
 
   if (!ws) {
+    const available = workbook.worksheets.map((s) => `"${s.name}"`).join(", ");
+    const digitHint = /^\d+$/.test(sheet as string)
+      ? ` (to address a sheet by position, pass the number ${sheet} as a JSON number, not a string)`
+      : "";
     throw new EngineError(
       ErrorCode.SHEET_NOT_FOUND,
-      `Sheet not found: ${sheet}`,
+      `Sheet not found: "${sheet}"${digitHint}. Available sheets: ${available}`,
     );
   }
 

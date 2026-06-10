@@ -51,7 +51,18 @@ import {
   deleteNamedRange,
   mergeCells,
   unmergeCells,
+  copyRange,
+  findReplace,
+  sortRange,
+  setCellNote,
+  setSheetProperties,
+  setRowVisibility,
+  setColumnVisibility,
+  protectSheet,
+  unprotectSheet,
+  setPageSetup,
   EngineError,
+  ErrorCode,
 } from "./xlsx-engine.js";
 import {
   parseCellAddress,
@@ -63,6 +74,7 @@ import {
   loadSafetyConfig,
   assertCellCount,
   assertWithinTemplate,
+  assertStructuralChangeAllowed,
 } from "./engine/safety.js";
 
 const require = createRequire(import.meta.url);
@@ -94,7 +106,17 @@ function rowRange(row: number, startCol: number, endCol: number): CellRange {
 // Shared schemas
 const filePathSchema = z.string().describe("Absolute path to the .xlsx file");
 const sheetSchema = z.union([z.string(), z.number().int().min(1)]).describe("Sheet name or 1-based index");
-const cellValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const cellValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.object({ date: z.string().describe("ISO date, e.g. '2024-01-15' or '2024-01-15T09:30:00Z'") }).strict(),
+  z.object({
+    hyperlink: z.string().describe("Target URL"),
+    text: z.string().optional().describe("Display text (defaults to the URL)"),
+  }).strict(),
+]).describe("Cell value. Strings starting with '=' are written as formulas ('=text to escape a literal). Use {date: 'ISO'} for true Excel dates, {hyperlink, text} for links.");
 const cellAddressSchema = z.string().regex(/^[A-Za-z]+\d+$/, "Invalid cell address (expected A1 format)").describe("Cell address (e.g. 'A1', 'B5')");
 const columnSchema = z.string().regex(/^[A-Za-z]+$/, "Invalid column letter").describe("Column letter (e.g. 'A', 'BC')");
 const hexColorSchema = z.string().regex(/^[0-9A-Fa-f]{6}$/, "Invalid hex color (expected 6-char hex, e.g. 'FF0000')");
@@ -105,34 +127,52 @@ const countSchema = z.number().int().min(1).describe("Number of items");
 // Server setup
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({
-  name: "xlsx-editor",
-  version: VERSION,
-  description: [
-    "Read, write, format, and manage Excel (.xlsx) workbooks.",
-    "",
-    "Supported: cell read/write, formulas, formatting (font/fill/border/alignment/numFmt),",
-    "merged cells, sheets, named ranges, data validation, row/column ops, freeze panes, auto filter.",
-    "",
-    "NOT supported (use Python/openpyxl/xlwings instead):",
-    "- Formula recalculation — cached results are read, but formulas are NOT recalculated on edit",
-    "- Charts — cannot read, create, or modify charts",
-    "- Pivot tables — not supported",
-    "- Conditional formatting — cannot read or create CF rules",
-    "- VBA/macros — preserved but cannot be read or executed",
-    "- Formula ref auto-update — inserting/deleting rows does NOT shift formula references",
-  ].join("\n"),
-});
+const server = new McpServer(
+  {
+    name: "xlsx-editor",
+    version: VERSION,
+  },
+  {
+    instructions: [
+      "Read, write, format, and manage Excel (.xlsx) workbooks.",
+      "",
+      "Supported: cell read/write, formulas, formatting (font/fill/border/alignment/numFmt),",
+      "merged cells, sheets, named ranges, data validation, row/column ops, freeze panes,",
+      "auto filter, cell notes, hyperlinks, date values, copy_range, find_replace, sort_range,",
+      "sheet protection, page setup, row/column/sheet visibility.",
+      "",
+      "Recommended workflow: get_workbook_info → read_sheet (with range) → search_cells → edit tools.",
+      "",
+      "LIMITATIONS:",
+      "- Formula recalculation: formulas are NOT evaluated on edit. Cells written as formulas",
+      "  read back as '(not calculated)' until the file is opened in Excel (recalc-on-open is",
+      "  enabled automatically on every save).",
+      "- Charts, pivot tables, and slicers are NOT preserved: any write operation removes them",
+      "  from the workbook. Do not edit workbooks whose charts/pivots must survive.",
+      "- Macro-enabled workbooks (.xlsm/.xltm) are read-only: writes are rejected because VBA",
+      "  projects cannot be preserved.",
+      "- Conditional formatting rules are preserved on save, but there are no tools to read or",
+      "  edit them yet.",
+      "- Formula ref auto-update: inserting/deleting rows/columns does NOT shift references",
+      "  inside formula text. Do structural changes BEFORE writing formulas.",
+      "",
+      "To write a literal string starting with '=', prefix it with a single quote ('=text).",
+    ].join("\n"),
+  },
+);
 
 // =========================================================================
 // Reading tools (8)
 // =========================================================================
 
-server.tool(
+server.registerTool(
   "get_workbook_info",
-  "Get metadata and structure overview of an XLSX file — sheet list, named range count, and file properties.",
   {
-    file_path: filePathSchema,
+    description: "Get metadata and structure overview of an XLSX file — sheet list, named range count, and file properties.",
+    inputSchema: {
+      file_path: filePathSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ file_path }) => {
     try {
@@ -144,18 +184,21 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "read_sheet",
-  "Read cell data from a sheet (values, formulas, types). Optionally specify a range like 'A1:C10'. Use compact=true to omit empty cells and merged-cell children for token-efficient output.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().optional().describe("Cell range to read (e.g. 'A1:C10'). Omit to read all data."),
-    compact: z.boolean().optional().default(false).describe("Omit empty cells and merged-cell children. Reduces output for sheets with many merged cells."),
+    description: "Read cell data from a sheet as JSON maps keyed by cell address: 'cells' (plain values), 'formulas' ({f, v}), 'dates', 'errors', 'notes', 'mergedCells'. An absent address means an empty cell. Optionally specify a range like 'A1:C10'. Output is capped at 5,000 cells — large sheets are truncated with a notice; read them in chunks via 'range'. Set include_styles=true to also get per-cell formatting in the same shape format_cells accepts.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().optional().describe("Cell range to read (e.g. 'A1:C10'). Omit to read all data."),
+      include_styles: z.boolean().optional().default(false).describe("Include per-cell formatting (format_cells vocabulary). Increases output size."),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
-  async ({ file_path, sheet, range, compact }) => {
+  async ({ file_path, sheet, range, include_styles }) => {
     try {
-      const result = await readSheet(file_path, sheet, range, compact);
+      const result = await readSheet(file_path, sheet, range, include_styles);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
@@ -163,13 +206,16 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "read_cell",
-  "Read a single cell's value, formula, type, and formatting.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    cell: cellAddressSchema,
+    description: "Read a single cell's value, formula, type, and formatting.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      cell: cellAddressSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, cell }) => {
     try {
@@ -181,18 +227,22 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "search_cells",
-  "Search for text or numbers in cells. Searches all sheets by default, or specify a sheet.",
   {
-    file_path: filePathSchema,
-    query: z.string().describe("Text to search for"),
-    sheet: sheetSchema.optional().describe("Sheet to search in (omit for all sheets)"),
-    case_sensitive: z.boolean().optional().default(false).describe("Case-sensitive search. Default false."),
+    description: "Search for text or numbers in cells. Searches all sheets by default, or specify a sheet.",
+    inputSchema: {
+      file_path: filePathSchema,
+      query: z.string().min(1).describe("Text to search for (must not be empty)"),
+      sheet: sheetSchema.optional().describe("Sheet to search in (omit for all sheets)"),
+      case_sensitive: z.boolean().optional().default(false).describe("Case-sensitive search. Default false."),
+      max_results: z.number().int().min(1).max(1000).optional().default(100).describe("Maximum matches to return (default 100, max 1000)"),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
-  async ({ file_path, query, sheet, case_sensitive }) => {
+  async ({ file_path, query, sheet, case_sensitive, max_results }) => {
     try {
-      const result = await searchCells(file_path, query, sheet, case_sensitive);
+      const result = await searchCells(file_path, query, sheet, case_sensitive, max_results);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
@@ -200,11 +250,14 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "list_named_ranges",
-  "List all named ranges in the workbook.",
   {
-    file_path: filePathSchema,
+    description: "List all named ranges in the workbook.",
+    inputSchema: {
+      file_path: filePathSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ file_path }) => {
     try {
@@ -216,12 +269,15 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "list_data_validations",
-  "List data validation rules on a sheet.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
+    description: "List data validation rules on a sheet.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet }) => {
     try {
@@ -233,12 +289,15 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "list_images",
-  "List images embedded in a sheet.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
+    description: "List images embedded in a sheet.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet }) => {
     try {
@@ -250,12 +309,15 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "get_sheet_properties",
-  "Get sheet properties including freeze panes, auto filter, and tab color.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
+    description: "Get sheet properties including freeze panes, auto filter, and tab color.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet }) => {
     try {
@@ -271,14 +333,17 @@ server.tool(
 // Cell Writing tools (5)
 // =========================================================================
 
-server.tool(
+server.registerTool(
   "write_cell",
-  "Set a single cell's value or formula. Start value with '=' for formulas (e.g. '=SUM(A1:A10)').",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    cell: cellAddressSchema,
-    value: cellValueSchema.describe("Value to set. Start with '=' for formulas."),
+    description: "Set a single cell's value or formula. Start value with '=' for formulas (e.g. '=SUM(A1:A10)').",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      cell: cellAddressSchema,
+      value: cellValueSchema.describe("Value to set. Start with '=' for formulas."),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, cell, value }) => {
     try {
@@ -292,16 +357,19 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "write_cells",
-  "Set multiple cells at once (bulk). Each entry specifies a cell address and value.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    cells: z.array(z.object({
-      cell: cellAddressSchema,
-      value: cellValueSchema.describe("Value to set"),
-    })).max(100000).describe("Array of cell edits (max 100,000)"),
+    description: "Set multiple cells at once (bulk). Each entry specifies a cell address and value.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      cells: z.array(z.object({
+        cell: cellAddressSchema,
+        value: cellValueSchema.describe("Value to set"),
+      })).max(100000).describe("Array of cell edits (max 100,000)"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, cells }) => {
     try {
@@ -317,15 +385,18 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "write_row",
-  "Write a row of values starting from a given row number and optional start column.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    row: rowSchema,
-    values: z.array(cellValueSchema).max(16384).describe("Array of values to write (max 16,384 — Excel column limit)"),
-    start_column: columnSchema.optional().describe("Start column letter (default 'A')"),
+    description: "Write a row of values starting from a given row number and optional start column.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      row: rowSchema,
+      values: z.array(cellValueSchema).max(16384).describe("Array of values to write (max 16,384 — Excel column limit)"),
+      start_column: columnSchema.optional().describe("Start column letter (default 'A')"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, row, values, start_column }) => {
     try {
@@ -340,15 +411,18 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "write_rows",
-  "Write multiple rows of data at once (bulk). Ideal for inserting tabular data.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    start_row: rowSchema.describe("Starting row number (1-based)"),
-    rows: z.array(z.array(cellValueSchema)).max(100000).describe("2D array of values: [[row1...], [row2...], ...] (max 100,000 rows)"),
-    start_column: columnSchema.optional().describe("Start column letter (default 'A')"),
+    description: "Write multiple rows of data at once (bulk). Ideal for inserting tabular data.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      start_row: rowSchema.describe("Starting row number (1-based)"),
+      rows: z.array(z.array(cellValueSchema)).max(100000).describe("2D array of values: [[row1...], [row2...], ...] (max 100,000 rows)"),
+      start_column: columnSchema.optional().describe("Start column letter (default 'A')"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, start_row, rows, start_column }) => {
     try {
@@ -373,21 +447,25 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "clear_cells",
-  "Clear cell values in a range (keeps formatting).",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().describe("Range to clear (e.g. 'A1:C10')"),
+    description: "Clear cell values and/or formatting in a range. mode='values' (default) keeps formatting, 'formats' keeps values, 'all' clears both.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range to clear (e.g. 'A1:C10')"),
+      mode: z.enum(["values", "formats", "all"]).optional().default("values").describe("What to clear (default 'values')"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
-  async ({ file_path, sheet, range }) => {
+  async ({ file_path, sheet, range, mode }) => {
     try {
       const r = parseRange(range);
       const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
       assertCellCount(cells, "clear_cells", safetyConfig);
       assertWithinTemplate(sheet, r, safetyConfig);
-      const result = await clearCells(file_path, sheet, range);
+      const result = await clearCells(file_path, sheet, range, mode);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
@@ -422,14 +500,17 @@ const formatOptionsSchema = z.object({
   numFmt: z.string().optional().describe("Number format string (e.g. '#,##0.00', 'yyyy-mm-dd')"),
 });
 
-server.tool(
+server.registerTool(
   "format_cells",
-  "Apply formatting (font, fill, border, alignment, number format) to a cell range.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().describe("Cell range (e.g. 'A1:C10')"),
-    format: formatOptionsSchema.describe("Format options to apply"),
+    description: "Apply formatting (font, fill, border, alignment, number format) to a cell range.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Cell range (e.g. 'A1:C10')"),
+      format: formatOptionsSchema.describe("Format options to apply"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, range, format }) => {
     try {
@@ -445,16 +526,19 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "format_cells_bulk",
-  "Apply different formatting to multiple ranges at once (bulk). One file I/O operation.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    groups: z.array(z.object({
-      range: z.string().describe("Cell range"),
-      format: formatOptionsSchema.describe("Format options"),
-    })).max(1000).describe("Array of range-format groups (max 1,000)"),
+    description: "Apply different formatting to multiple ranges at once (bulk). One file I/O operation.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      groups: z.array(z.object({
+        range: z.string().describe("Cell range"),
+        format: formatOptionsSchema.describe("Format options"),
+      })).max(1000).describe("Array of range-format groups (max 1,000)"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, groups }) => {
     try {
@@ -477,14 +561,17 @@ server.tool(
 // Row/Column tools (8)
 // =========================================================================
 
-server.tool(
+server.registerTool(
   "set_column_width",
-  "Set the width of a single column.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    column: columnSchema,
-    width: z.number().min(0).max(255).describe("Column width in characters (0-255)"),
+    description: "Set the width of a single column.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      column: columnSchema,
+      width: z.number().min(0).max(255).describe("Column width in characters (0-255)"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, column, width }) => {
     try {
@@ -496,16 +583,19 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "set_column_widths",
-  "Set widths for multiple columns at once (bulk).",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    columns: z.array(z.object({
-      column: columnSchema,
-      width: z.number().min(0).max(255).describe("Column width"),
-    })).describe("Array of column-width pairs"),
+    description: "Set widths for multiple columns at once (bulk).",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      columns: z.array(z.object({
+        column: columnSchema,
+        width: z.number().min(0).max(255).describe("Column width"),
+      })).describe("Array of column-width pairs"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, columns }) => {
     try {
@@ -517,14 +607,17 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "set_row_height",
-  "Set the height of a single row.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    row: rowSchema,
-    height: z.number().min(0).max(409).describe("Row height in points (0-409)"),
+    description: "Set the height of a single row.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      row: rowSchema,
+      height: z.number().min(0).max(409).describe("Row height in points (0-409)"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, row, height }) => {
     try {
@@ -536,16 +629,19 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "set_row_heights",
-  "Set heights for multiple rows at once (bulk).",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    rows: z.array(z.object({
-      row: z.number().int().min(1).describe("Row number"),
-      height: z.number().min(0).max(409).describe("Row height"),
-    })).describe("Array of row-height pairs"),
+    description: "Set heights for multiple rows at once (bulk).",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      rows: z.array(z.object({
+        row: z.number().int().min(1).describe("Row number"),
+        height: z.number().min(0).max(409).describe("Row height"),
+      })).describe("Array of row-height pairs"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, rows }) => {
     try {
@@ -557,18 +653,23 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "insert_rows",
-  "Insert empty rows at the specified position. Existing rows shift down.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    row: rowSchema.describe("Row number to insert before (1-based)"),
-    count: countSchema.describe("Number of rows to insert"),
+    description: "Insert empty rows at the specified position. Existing rows shift down. Set inherit_style=true to copy formatting from the row above. WARNING: references inside existing formulas are NOT updated — do structural changes before writing formulas.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      row: rowSchema.describe("Row number to insert before (1-based)"),
+      count: countSchema.describe("Number of rows to insert"),
+      inherit_style: z.boolean().optional().default(false).describe("Copy formatting (and row height) from the row above the insertion point"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
-  async ({ file_path, sheet, row, count }) => {
+  async ({ file_path, sheet, row, count, inherit_style }) => {
     try {
-      const result = await insertRows(file_path, sheet, row, count);
+      assertStructuralChangeAllowed("insert_rows", safetyConfig);
+      const result = await insertRows(file_path, sheet, row, count, inherit_style);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
@@ -576,17 +677,21 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "delete_rows",
-  "Delete rows at the specified position. Remaining rows shift up.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    row: rowSchema.describe("First row to delete (1-based)"),
-    count: countSchema.describe("Number of rows to delete"),
+    description: "Delete rows at the specified position. Remaining rows shift up. WARNING: references inside remaining formulas are NOT updated and may break or point at wrong cells.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      row: rowSchema.describe("First row to delete (1-based)"),
+      count: countSchema.describe("Number of rows to delete"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet, row, count }) => {
     try {
+      assertStructuralChangeAllowed("delete_rows", safetyConfig);
       const result = await deleteRows(file_path, sheet, row, count);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -595,17 +700,21 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "insert_columns",
-  "Insert empty columns at the specified position. Existing columns shift right.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    column: columnSchema.describe("Column letter to insert before (e.g. 'B')"),
-    count: countSchema.describe("Number of columns to insert"),
+    description: "Insert empty columns at the specified position. Existing columns shift right. WARNING: references inside existing formulas are NOT updated — do structural changes before writing formulas.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      column: columnSchema.describe("Column letter to insert before (e.g. 'B')"),
+      count: countSchema.describe("Number of columns to insert"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet, column, count }) => {
     try {
+      assertStructuralChangeAllowed("insert_columns", safetyConfig);
       const result = await insertColumns(file_path, sheet, column, count);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -614,17 +723,21 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "delete_columns",
-  "Delete columns at the specified position. Remaining columns shift left.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    column: columnSchema.describe("First column to delete (e.g. 'B')"),
-    count: countSchema.describe("Number of columns to delete"),
+    description: "Delete columns at the specified position. Remaining columns shift left. WARNING: references inside remaining formulas are NOT updated and may break or point at wrong cells.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      column: columnSchema.describe("First column to delete (e.g. 'B')"),
+      count: countSchema.describe("Number of columns to delete"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet, column, count }) => {
     try {
+      assertStructuralChangeAllowed("delete_columns", safetyConfig);
       const result = await deleteColumns(file_path, sheet, column, count);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -637,12 +750,15 @@ server.tool(
 // Sheet Operation tools (4)
 // =========================================================================
 
-server.tool(
+server.registerTool(
   "add_sheet",
-  "Add a new empty sheet to the workbook.",
   {
-    file_path: filePathSchema,
-    name: z.string().describe("Name for the new sheet"),
+    description: "Add a new empty sheet to the workbook.",
+    inputSchema: {
+      file_path: filePathSchema,
+      name: z.string().describe("Name for the new sheet"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, name }) => {
     try {
@@ -654,16 +770,20 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "rename_sheet",
-  "Rename an existing sheet.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    new_name: z.string().describe("New name for the sheet"),
+    description: "Rename an existing sheet.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      new_name: z.string().describe("New name for the sheet"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet, new_name }) => {
     try {
+      assertStructuralChangeAllowed("rename_sheet", safetyConfig);
       const result = await renameSheet(file_path, sheet, new_name);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -672,15 +792,19 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "delete_sheet",
-  "Delete a sheet from the workbook.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
+    description: "Delete a sheet from the workbook.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet }) => {
     try {
+      assertStructuralChangeAllowed("delete_sheet", safetyConfig);
       const result = await deleteSheet(file_path, sheet);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -689,13 +813,16 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "copy_sheet",
-  "Copy a sheet within the workbook. Copies cell values, styles, column widths, row heights, and merged cells. Does not copy data validation, conditional formatting, or view settings.",
   {
-    file_path: filePathSchema,
-    source_sheet: sheetSchema.describe("Source sheet name or index"),
-    new_name: z.string().describe("Name for the copied sheet"),
+    description: "Copy a sheet within the workbook. Copies cell values, styles, column widths, row heights, and merged cells. Does not copy data validation, conditional formatting, or view settings.",
+    inputSchema: {
+      file_path: filePathSchema,
+      source_sheet: sheetSchema.describe("Source sheet name or index"),
+      new_name: z.string().describe("Name for the copied sheet"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, source_sheet, new_name }) => {
     try {
@@ -711,18 +838,21 @@ server.tool(
 // View Settings tools (3)
 // =========================================================================
 
-server.tool(
+server.registerTool(
   "set_freeze_panes",
-  "Freeze rows and/or columns. Set both to 0 to unfreeze.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    row: z.number().int().min(0).describe("Number of rows to freeze from top (0 to unfreeze)"),
-    column: z.number().int().min(0).describe("Number of columns to freeze from left (0 to unfreeze)"),
+    description: "Freeze rows and/or columns. Set both to 0 to unfreeze.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      freeze_rows: z.number().int().min(0).describe("Number of rows to freeze from top (0 to unfreeze)"),
+      freeze_columns: z.number().int().min(0).describe("Number of columns to freeze from left (0 to unfreeze)"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
-  async ({ file_path, sheet, row, column }) => {
+  async ({ file_path, sheet, freeze_rows, freeze_columns }) => {
     try {
-      const result = await setFreeze(file_path, sheet, row, column);
+      const result = await setFreeze(file_path, sheet, freeze_rows, freeze_columns);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
       return { content: [{ type: "text", text: formatError(e) }], isError: true };
@@ -730,13 +860,16 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "set_auto_filter",
-  "Enable auto filter on a range.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().describe("Range for auto filter (e.g. 'A1:D1')"),
+    description: "Enable auto filter on a range.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range for auto filter (e.g. 'A1:D1')"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, range }) => {
     try {
@@ -748,12 +881,15 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "remove_auto_filter",
-  "Remove auto filter from a sheet.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
+    description: "Remove auto filter from a sheet.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet }) => {
     try {
@@ -769,23 +905,26 @@ server.tool(
 // Data Validation / Named Ranges / Structure tools (7)
 // =========================================================================
 
-server.tool(
+server.registerTool(
   "add_data_validation",
-  "Add a data validation rule to a range (list, whole number, decimal, date, text length, custom).",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().describe("Range to apply validation (e.g. 'A1:A100')"),
-    type: z.enum(["list", "whole", "decimal", "date", "textLength", "custom"]).describe("Validation type"),
-    formulae: z.array(z.string()).describe("Validation formulae (e.g. ['\"Yes,No\"'] for list, ['1','100'] for range)"),
-    operator: z.enum(["between", "notBetween", "equal", "notEqual", "greaterThan", "lessThan", "greaterThanOrEqual", "lessThanOrEqual"]).optional().describe("Comparison operator"),
-    allow_blank: z.boolean().optional().default(true).describe("Allow blank cells"),
-    show_error_message: z.boolean().optional().describe("Show error popup"),
-    error_title: z.string().optional().describe("Error popup title"),
-    error: z.string().optional().describe("Error popup message"),
-    show_input_message: z.boolean().optional().describe("Show input hint"),
-    prompt_title: z.string().optional().describe("Input hint title"),
-    prompt: z.string().optional().describe("Input hint message"),
+    description: "Add a data validation rule to a range (list, whole number, decimal, date, text length, custom).",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range to apply validation (e.g. 'A1:A100')"),
+      type: z.enum(["list", "whole", "decimal", "date", "textLength", "custom"]).describe("Validation type"),
+      formulae: z.array(z.string()).describe("Validation formulae (e.g. ['\"Yes,No\"'] for list, ['1','100'] for range)"),
+      operator: z.enum(["between", "notBetween", "equal", "notEqual", "greaterThan", "lessThan", "greaterThanOrEqual", "lessThanOrEqual"]).optional().describe("Comparison operator"),
+      allow_blank: z.boolean().optional().default(true).describe("Allow blank cells"),
+      show_error_message: z.boolean().optional().describe("Show error popup"),
+      error_title: z.string().optional().describe("Error popup title"),
+      error: z.string().optional().describe("Error popup message"),
+      show_input_message: z.boolean().optional().describe("Show input hint"),
+      prompt_title: z.string().optional().describe("Input hint title"),
+      prompt: z.string().optional().describe("Input hint message"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, range, type, formulae, operator, allow_blank, show_error_message, error_title, error, show_input_message, prompt_title, prompt }) => {
     try {
@@ -808,13 +947,16 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "remove_data_validation",
-  "Remove data validation rules from a range.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().describe("Range to remove validation from (e.g. 'A1:A100')"),
+    description: "Remove data validation rules from a range.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range to remove validation from (e.g. 'A1:A100')"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, range }) => {
     try {
@@ -826,14 +968,17 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "add_named_range",
-  "Add a named range to the workbook.",
   {
-    file_path: filePathSchema,
-    name: z.string().describe("Name for the range"),
-    range: z.string().describe("Cell range (e.g. 'A1:C10')"),
-    sheet: sheetSchema.optional().describe("Sheet the range belongs to (for scoped names)"),
+    description: "Add a named range to the workbook.",
+    inputSchema: {
+      file_path: filePathSchema,
+      name: z.string().describe("Name for the range"),
+      range: z.string().describe("Cell range (e.g. 'A1:C10')"),
+      sheet: sheetSchema.optional().describe("Sheet the range belongs to (for scoped names)"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, name, range, sheet }) => {
     try {
@@ -845,12 +990,15 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "delete_named_range",
-  "Delete a named range from the workbook.",
   {
-    file_path: filePathSchema,
-    name: z.string().describe("Name of the range to delete"),
+    description: "Delete a named range from the workbook.",
+    inputSchema: {
+      file_path: filePathSchema,
+      name: z.string().describe("Name of the range to delete"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, name }) => {
     try {
@@ -862,16 +1010,23 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "merge_cells",
-  "Merge a range of cells.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().describe("Range to merge (e.g. 'A1:C1')"),
+    description: "Merge a range of cells.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range to merge (e.g. 'A1:C1')"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet, range }) => {
     try {
+      const r = parseRange(range);
+      const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
+      assertCellCount(cells, "merge_cells", safetyConfig);
+      assertWithinTemplate(sheet, r, safetyConfig);
       const result = await mergeCells(file_path, sheet, range);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -880,16 +1035,23 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "unmerge_cells",
-  "Unmerge a previously merged range of cells.",
   {
-    file_path: filePathSchema,
-    sheet: sheetSchema,
-    range: z.string().describe("Range to unmerge (e.g. 'A1:C1')"),
+    description: "Unmerge a previously merged range of cells.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range to unmerge (e.g. 'A1:C1')"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
   async ({ file_path, sheet, range }) => {
     try {
+      const r = parseRange(range);
+      const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
+      assertCellCount(cells, "unmerge_cells", safetyConfig);
+      assertWithinTemplate(sheet, r, safetyConfig);
       const result = await unmergeCells(file_path, sheet, range);
       return { content: [{ type: "text", text: result }] };
     } catch (e: unknown) {
@@ -898,12 +1060,282 @@ server.tool(
   },
 );
 
-server.tool(
-  "create_workbook",
-  "Create a new empty XLSX workbook. Fails if file already exists.",
+// =========================================================================
+// Range tools — copy, find/replace, sort
+// =========================================================================
+
+server.registerTool(
+  "copy_range",
   {
-    file_path: filePathSchema,
-    sheet_name: z.string().optional().describe("Name of the first sheet (default 'Sheet1')"),
+    description: "Copy a cell range (values, formulas, formatting, merges) to another location, optionally on a different sheet. Relative references inside formulas are shifted to the destination ($-anchored references stay fixed). Existing content at the destination is overwritten.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema.describe("Source sheet"),
+      source_range: z.string().describe("Range to copy (e.g. 'A1:C10')"),
+      destination: cellAddressSchema.describe("Top-left cell of the destination (e.g. 'E1')"),
+      dest_sheet: sheetSchema.optional().describe("Destination sheet (defaults to the source sheet)"),
+    },
+    // 重複領域コピーは再実行のたびに結果が変わるため idempotent ではない
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ file_path, sheet, source_range, destination, dest_sheet }) => {
+    try {
+      const src = parseRange(source_range);
+      const cells = (src.endRow - src.startRow + 1) * (src.endCol - src.startCol + 1);
+      assertCellCount(cells, "copy_range", safetyConfig);
+      const dst = parseCellAddress(destination);
+      const destRegion: CellRange = {
+        startRow: dst.row,
+        startCol: dst.col,
+        endRow: dst.row + (src.endRow - src.startRow),
+        endCol: dst.col + (src.endCol - src.startCol),
+      };
+      assertWithinTemplate(dest_sheet ?? sheet, destRegion, safetyConfig);
+      const result = await copyRange(file_path, sheet, source_range, destination, dest_sheet);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "find_replace",
+  {
+    description: "Find and replace text across plain string cells. Formulas, numbers, rich text, and hyperlinks are not modified. Searches all sheets unless one is specified.",
+    inputSchema: {
+      file_path: filePathSchema,
+      query: z.string().min(1).describe("Text to find"),
+      replacement: z.string().describe("Replacement text (may be empty to delete the match)"),
+      sheet: sheetSchema.optional().describe("Sheet to operate on (omit for all sheets)"),
+      case_sensitive: z.boolean().optional().default(false).describe("Case-sensitive matching. Default false."),
+      match_entire_cell: z.boolean().optional().default(false).describe("Replace only cells whose entire content equals the query"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ file_path, query, replacement, sheet, case_sensitive, match_entire_cell }) => {
+    try {
+      if (safetyConfig.templateMode) {
+        throw new EngineError(
+          ErrorCode.OUTSIDE_TEMPLATE_RANGE,
+          "find_replace is disabled in template mode: it cannot be constrained to the declared ranges. Use search_cells + write_cells instead.",
+        );
+      }
+      const result = await findReplace(file_path, query, replacement, sheet, case_sensitive, match_entire_cell);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "sort_range",
+  {
+    description: "Sort the rows of a range by a key column (values, formulas, and formatting move together; relative formula references are shifted). Numbers sort before text; empty cells always sort last. Fails if the range intersects merged cells.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      range: z.string().describe("Range to sort (e.g. 'A2:F50')"),
+      key_column: columnSchema.describe("Column letter to sort by (must be inside the range)"),
+      ascending: z.boolean().optional().default(true).describe("Sort direction. Default ascending."),
+      has_header: z.boolean().optional().default(false).describe("Skip the first row of the range (header)"),
+    },
+    annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, range, key_column, ascending, has_header }) => {
+    try {
+      const r = parseRange(range);
+      const cells = (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1);
+      assertCellCount(cells, "sort_range", safetyConfig);
+      assertWithinTemplate(sheet, r, safetyConfig);
+      const result = await sortRange(file_path, sheet, range, key_column, ascending, has_header);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// =========================================================================
+// Cell note / sheet appearance / protection / page setup tools
+// =========================================================================
+
+server.registerTool(
+  "set_cell_note",
+  {
+    description: "Set or remove a cell note (comment). Pass null to remove.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      cell: cellAddressSchema,
+      note: z.union([z.string(), z.null()]).describe("Note text, or null to remove the note"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, cell, note }) => {
+    try {
+      // ノートも納品物に現れるコンテンツなので、テンプレートモードの
+      // ホワイトリストを適用する
+      assertCellCount(1, "set_cell_note", safetyConfig);
+      assertWithinTemplate(sheet, cellAddrToRange(cell), safetyConfig);
+      const result = await setCellNote(file_path, sheet, cell, note);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_sheet_properties",
+  {
+    description: "Set sheet visibility (visible/hidden/veryHidden) and/or tab color. A workbook must keep at least one visible sheet.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      state: z.enum(["visible", "hidden", "veryHidden"]).optional().describe("Sheet visibility. 'veryHidden' sheets can only be re-shown programmatically."),
+      tab_color: z.union([hexColorSchema, z.null()]).optional().describe("Tab color as 6-char hex (e.g. 'FF0000'), or null to remove"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, state, tab_color }) => {
+    try {
+      const result = await setSheetProperties(file_path, sheet, { state, tabColor: tab_color });
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_row_visibility",
+  {
+    description: "Hide or unhide a range of rows.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      start_row: rowSchema.describe("First row"),
+      end_row: rowSchema.describe("Last row (inclusive)"),
+      hidden: z.boolean().describe("true to hide, false to unhide"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, start_row, end_row, hidden }) => {
+    try {
+      const result = await setRowVisibility(file_path, sheet, start_row, end_row, hidden);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_column_visibility",
+  {
+    description: "Hide or unhide a range of columns.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      start_column: columnSchema.describe("First column letter"),
+      end_column: columnSchema.describe("Last column letter (inclusive)"),
+      hidden: z.boolean().describe("true to hide, false to unhide"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, start_column, end_column, hidden }) => {
+    try {
+      const result = await setColumnVisibility(file_path, sheet, start_column, end_column, hidden);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "protect_sheet",
+  {
+    description: "Protect a sheet against editing in Excel, optionally with a password. NOTE: this is Excel UI-level protection, not encryption — this server and other tools can still modify the file.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      password: z.string().optional().describe("Optional protection password"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, password }) => {
+    try {
+      const result = await protectSheet(file_path, sheet, password);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "unprotect_sheet",
+  {
+    description: "Remove sheet protection.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet }) => {
+    try {
+      const result = await unprotectSheet(file_path, sheet);
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "set_page_setup",
+  {
+    description: "Configure print/PDF layout: orientation, print area, fit-to-page, paper size.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet: sheetSchema,
+      orientation: z.enum(["portrait", "landscape"]).optional().describe("Page orientation"),
+      print_area: z.string().optional().describe("Print area range (e.g. 'A1:G40')"),
+      fit_to_width: z.number().int().min(1).optional().describe("Fit to N pages wide"),
+      fit_to_height: z.number().int().min(1).optional().describe("Fit to N pages tall"),
+      paper_size: z.enum(["A4", "A3", "letter", "legal"]).optional().describe("Paper size"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ file_path, sheet, orientation, print_area, fit_to_width, fit_to_height, paper_size }) => {
+    try {
+      const result = await setPageSetup(file_path, sheet, {
+        orientation,
+        printArea: print_area,
+        fitToWidth: fit_to_width,
+        fitToHeight: fit_to_height,
+        paperSize: paper_size,
+      });
+      return { content: [{ type: "text", text: result }] };
+    } catch (e: unknown) {
+      return { content: [{ type: "text", text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "create_workbook",
+  {
+    description: "Create a new empty XLSX workbook. Fails if file already exists.",
+    inputSchema: {
+      file_path: filePathSchema,
+      sheet_name: z.string().optional().describe("Name of the first sheet (default 'Sheet1')"),
+    },
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   async ({ file_path, sheet_name }) => {
     try {

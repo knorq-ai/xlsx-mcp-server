@@ -1,6 +1,6 @@
 {
   "name": "@knorq/xlsx-mcp-server",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "MCP server for XLSX spreadsheet editing — read, write, format, and manage Excel workbooks",
   "type": "module",
   "main": "dist/index.js",
@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "exceljs": "^4.4.0",
+    "exceljs": "4.4.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {

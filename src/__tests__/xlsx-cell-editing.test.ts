@@ -92,8 +92,7 @@ describe("write_row", () => {
 
     const result = await readSheet(p, 1, "A1:C1");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    const values = json.data[0].cells.map((c: { value: unknown }) => c.value);
-    expect(values).toEqual(["X", "Y", "Z"]);
+    expect([json.cells.A1, json.cells.B1, json.cells.C1]).toEqual(["X", "Y", "Z"]);
   });
 
   it("writes from a start column", async () => {
@@ -119,9 +118,8 @@ describe("write_rows (bulk)", () => {
 
     const result = await readSheet(p, 1, "A1:B3");
     const json = JSON.parse(result.split("<json>")[1].split("</json>")[0]);
-    expect(json.data.length).toBe(3);
-    expect(json.data[1].cells[0].value).toBe(100);
-    expect(json.data[2].cells[1].value).toBe(400);
+    expect(json.cells.A2).toBe(100);
+    expect(json.cells.B3).toBe(400);
   });
 });
 

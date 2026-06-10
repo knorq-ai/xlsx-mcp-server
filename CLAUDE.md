@@ -6,43 +6,30 @@
 
 ```
 src/
-  index.ts              … MCP サーバ本体（ツール登録・stdio transport）
+  index.ts              … MCP サーバ本体（registerTool + annotations、stdio transport）
   xlsx-engine.ts        … バレルモジュール（engine/* を再エクスポート + 公開 API 関数）
   engine/
-    xlsx-io.ts          … ファイル I/O（ExcelJS Workbook）、ErrorCode、EngineError
-    cells.ts            … セルアドレス解析（A1 記法）、値読み書き、型変換
-    formatting.ts       … セル書式（font/fill/border/alignment/numFmt）
-    sheets.ts           … シート操作（追加/名前変更/削除/コピー）
-    rows-columns.ts     … 行列操作（挿入/削除）
+    xlsx-io.ts          … ファイル I/O（アトミック保存、.xlsm 書き込み拒否）、ErrorCode、EngineError
+    cells.ts            … A1 記法解析、値読み書き、型変換、共有数式の実体化、SheetJson 変換
+    formatting.ts       … セル書式（適用 + 読み戻し summarizeCellStyle）
+    sheets.ts           … シート操作（追加/名前変更/削除/コピー、シート名検証）
+    rows-columns.ts     … 行列操作（挿入/削除、結合・データ検証のシフト保全）
     data-validation.ts  … データ検証ルール
     images.ts           … 画像一覧
     view-settings.ts    … フリーズペイン、オートフィルタ
     named-ranges.ts     … 名前付き範囲
-    file-lock.ts        … ファイル単位の Promise チェーン書き込みロック
-  __tests__/
-    helpers.ts
-    xlsx-reading.test.ts
-    xlsx-cell-editing.test.ts
-    xlsx-formatting.test.ts
-    xlsx-sheet-ops.test.ts
-    xlsx-rows-columns.test.ts
-    xlsx-data-validation.test.ts
-    xlsx-view-settings.test.ts
-    xlsx-named-ranges.test.ts
-    xlsx-bulk-operations.test.ts
-    xlsx-edge-cases.test.ts
-    file-lock.test.ts
+    file-lock.ts        … 2 層書き込みロック（プロセス内 Promise チェーン + .mcplock）
+  __tests__/            … vitest テスト
 ```
 
 ### モジュール依存グラフ（非循環）
 
 ```
-file-lock (独立)
-
-xlsx-io  ←  cells  ←  formatting
-   ↑            ↑
-   ├── sheets   └── data-validation
-   ├── rows-columns
+xlsx-io ← formatting ← cells
+   ↑                     ↑
+   ├── file-lock         └── data-validation
+   ├── sheets
+   ├── rows-columns ← cells
    ├── images
    ├── view-settings
    └── named-ranges
@@ -60,76 +47,97 @@ npx vitest run    # 全テスト実行
 1. `get_workbook_info` でワークブックの構造を把握する
 2. `read_sheet` で対象シートのデータを読む（range で範囲指定可能）
 3. `search_cells` で編集対象のセルを特定する
-4. 編集系ツール（`write_cell`, `write_rows` 等）で変更を行う
+4. 編集系ツール（`write_cell`, `write_rows`, `copy_range`, `find_replace` 等）で変更を行う
 
 ## セルアドレス
 
 - **A1 記法**: セルアドレスは Excel 標準の A1 記法（例: `A1`, `BC42`）
-- **範囲**: コロン区切り（例: `A1:C10`）
+- **範囲**: コロン区切り（例: `A1:C10`）。`A:A` のような全列・全行指定は不可
 - **シート指定**: 名前（`"Sheet1"`）または 1-based インデックス（`1`）
+- **上限**: 行 1,048,576・列 XFD (16,384)。超過は明示エラー
 
-## デフォルト動作
+## 書き込み値
 
-| パラメータ | デフォルト値 | 備考 |
-|---|---|---|
-| `case_sensitive` | `false` | 検索時の大文字小文字区別 |
-| `compact` | `false` | `read_sheet` のコンパクトモード。結合セルの子とnullセルを省略 |
-| シート指定省略 | — | `search_cells` のみ全シート検索 |
+`write_cell` / `write_cells` / `write_row` / `write_rows` の値:
 
-## パラメータ規約
-
-- **ファイルパス**: すべて絶対パスで指定する
-- **列**: 英字（A, B, ..., Z, AA, AB, ...）
-- **行**: 1-based 数値
-- **列幅**: 文字数単位（Excel の標準列幅と同じ）
-- **行高**: ポイント（pt）
+- 文字列・数値・真偽値・null
+- `=` で始まる文字列 → 数式（リテラルにするには `'=` でエスケープ）
+- `{ date: "2024-01-15" }` → Excel の日付値
+- `{ hyperlink: "https://...", text?: "表示名" }` → ハイパーリンク
+- 結合セルの**子**への書き込みはエラー（マスターを上書きしてしまうため）
 
 ## 構造化レスポンス
 
-`get_workbook_info`, `read_sheet`, `read_cell`, `search_cells`, `list_named_ranges`, `list_data_validations`, `list_images`, `get_sheet_properties` はテキストの後に `<json>...</json>` ブロックで構造化データを返す。LLM はテキスト部分で自然言語応答を構成し、プログラムは JSON 部分をパースして利用できる。
+読み取り系ツールはテキストサマリの後に `<json>...</json>` ブロックで構造化データを返す。
 
-### 結合セルの値
+### read_sheet の JSON 形式（マップ形式）
 
-`read_sheet` / `read_cell` の結合セル: マスターセルのみが値を持ち、子セルは `mergedWith` 参照のみを返す（値は `null`）。`compact: true` を指定すると、子セルと空セルが出力から完全に省略される。
+セルアドレスをキーにした密な形式。**キーが無い = 空セル**。
+
+```json
+{
+  "sheetName": "Sheet1", "range": "A1:C10", "totalRows": 10, "totalColumns": 3,
+  "cells":     { "A1": "Name", "B1": 42, "C1": true },
+  "formulas":  { "C2": { "f": "A1*2", "v": 84 } },
+  "dates":     { "A3": "2024-01-15T00:00:00.000Z" },
+  "errors":    { "B4": "#DIV/0!" },
+  "hyperlinks":{ "A5": "https://example.com" },
+  "numFmts":   { "B1": "#,##0" },
+  "notes":     { "A1": "コメント" },
+  "styles":    { "A1": { "bold": true } },
+  "mergedCells": ["A1:C1"],
+  "truncated": true, "truncatedAtRow": 500
+}
+```
+
+- `formulas[addr].v` が無い = 結果未計算（書き込み直後の数式。Excel で開くと再計算される）
+- `styles` は `include_styles: true` のときのみ。**format_cells が受け取る形式と同一**なので、読んだ書式をそのまま複製できる
+- 出力は 5,000 セルで打ち切り（`truncated` フラグ + 続きは range 指定）
+- `read_cell` の `style` も同じ format_cells 形式
 
 ### 数式の表記
 
-- **読み取り出力（`formula` フィールド）**: 先頭の `=` を**付けない**（例: `$C2*E2`）。Excel UI 表示と同じ参照文字列で、計算結果は `value` フィールドに入る。
-- **書き込み入力（`write_cell` 等）**: 先頭に `=` を**付ける**（例: `=SUM(A1:A2)`）。エンジンが `=` を剥がして格納する。
-- **共有数式（shared formula）**: Excel が複数セルで共有する数式は、各スレーブセルで相対参照をずらした**そのセル固有の数式**に変換して返す（例: マスター `G2=$C2*D2` のグループで `H2` は `$C2*E2`）。マスターセルのアドレスをそのまま返すことはない。
+- **読み取り出力**: 先頭の `=` を**付けない**（例: `$C2*E2`）
+- **書き込み入力**: 先頭に `=` を**付ける**（例: `=SUM(A1:A2)`）
+- **共有数式**: スレーブセルは相対参照をずらした**そのセル固有の数式**で返す。マスターのアドレスを formula に返すことはない（解決不能な場合は `sharedGroupMaster` に分離）
+- 構造変更（splice）や共有数式マスターの上書き時は、グループを通常数式に自動実体化する
 
-## 書き込みロック
+## 書き込みロック・保存
 
-書き込み関数は `withFileLock` でラップされており、同一ファイルへの並行書き込みを自動直列化する。読み取り関数はロック不要。
+- 書き込みは 2 層ロック: プロセス内 Promise チェーン + プロセス間 `.mcplock`（PID 記録、死活判定付き、10 秒タイムアウト）
+- 保存はアトミック（同一ディレクトリの一時ファイル → rename）。クラッシュで元ファイルは壊れない
+- 保存時に `fullCalcOnLoad` を立てる（Excel が開いたとき数式を再計算する）
+- `XLSX_BACKUP_ON_WRITE=1` で保存前に `<file>.bak` を作成
+- `.xlsm` / `.xltm` への書き込みは拒否（VBA が消えるため）。読み取りは可
 
 ## 入力検証
 
-- **セルアドレス**: Zod regex `/^[A-Za-z]+\d+$/` で A1 記法を検証
-- **列文字**: Zod regex `/^[A-Za-z]+$/` で英字のみを検証
-- **行番号**: 1 以上の整数（Zod `.int().min(1)`）
-- **カウント**: 1 以上の整数（行挿入・削除の count 等）
-- **シートインデックス**: 1 以上の整数（0 は不正）
-- **列幅**: 0〜255 文字単位
-- **行高**: 0〜409 ポイント
-- **フォントサイズ**: 1〜409 ポイント
-- **色**: 6 文字 hex（Zod regex `/^[0-9A-Fa-f]{6}$/`、例: `FF0000`）
-- **範囲サイズ**: 書き込み・書式・データ検証で 100,000 セル上限
-- **ファイルサイズ**: 100 MB 上限（`openXlsx` で検証）
-- **`create_workbook`**: 既存ファイルがある場合はエラー（上書き防止）
+- **セルアドレス**: A1 記法 + Excel グリッド上限（行 1,048,576 / 列 16,384）
+- **シート名**: 空・32 文字以上・`* ? : \ / [ ]`・先頭末尾アポストロフィを拒否
+- **範囲サイズ**: 書き込み・書式・データ検証・copy_range・sort_range で 100,000 セル上限
+- **読み取り出力**: read_sheet 5,000 セル / search_cells max_results（既定 100、最大 1,000）
+- **ファイルサイズ**: 100 MB 上限
+- **create_workbook**: O_EXCL（`wx`）で OS レベルの上書き防止
+
+## 安全ガード（env 設定、LLM からは変更不可）
+
+- `XLSX_MAX_CELLS_PER_CALL` … 1 コールのセル数上限
+- `XLSX_TEMPLATE_MODE` + `XLSX_TEMPLATE_RANGES` … "Sheet!Range" ホワイトリスト外への書き込み拒否。構造変更ツール（行列挿入/削除、シート削除/改名）と find_replace はテンプレートモード中は全面拒否
+- `XLSX_BACKUP_ON_WRITE` … 保存前バックアップ
 
 ## ExcelJS の制限事項
 
-以下の機能は ExcelJS の制限上、サポートしない:
-- チャート（Chart）の作成・編集
-- ピボットテーブルの作成・編集
-- 条件付き書式の作成・編集
-- VBA マクロの読み書き（XLSM は開けるが VBA は保持のみ）
-- **数式参照の自動更新**: `insert_rows` / `insert_columns` / `delete_rows` / `delete_columns` を実行しても、既存セルの数式参照は更新されない。行・列の構造変更は数式の書き込み**前**に行うこと
+- **チャート・ピボットテーブル・スライサー**: 書き込み操作で**消える**（ExcelJS が保持しない）。これらを含むブックの編集は不可逆
+- **条件付き書式**: 保存で保持はされるが、読み書きツールは未提供
+- **VBA**: .xlsm は読み取り専用
+- **数式の再計算**: サーバ側では行わない（fullCalcOnLoad で Excel 起動時に再計算）
+- **数式参照の自動更新**: `insert_rows` 等で既存数式内の参照はシフトしない。構造変更は数式の書き込み**前**に行うこと
+  - 結合セル・データ検証は splice 時に自動シフトされる（rows-columns.ts で保全）
 
 ## アンチパターン
 
-- 大量のセルを個別に `write_cell` で設定 → `write_cells` や `write_rows` でまとめて適用する（1 回のファイル I/O で済む）
-- 複数範囲に個別に `format_cells` を適用 → `format_cells_bulk` でまとめて適用する
-- 列幅を個別に `set_column_width` で設定 → `set_column_widths` でまとめて設定する
-- 行高を個別に `set_row_height` で設定 → `set_row_heights` でまとめて設定する
-- 数式を書いた後に `insert_rows` / `insert_columns` で行列を挿入 → 数式参照がずれる。構造変更を先に行い、数式は最後に書く
+- 大量のセルを個別に `write_cell` → `write_cells` / `write_rows` でまとめる
+- 個別の `format_cells` 連打 → `format_cells_bulk`
+- 検索 → 1 件ずつ write_cell で置換 → `find_replace`
+- 書式付きブロックの再現を 1 セルずつ → `copy_range`
+- 数式を書いた後に行列を挿入 → 参照がずれる。構造変更が先
