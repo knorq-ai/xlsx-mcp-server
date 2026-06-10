@@ -1,7 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
+import ExcelJS from "exceljs";
 import {
   cleanupTmpFiles,
   createTmpWorkbook,
+  tmpXlsxPath,
+  trackTmpFile,
 } from "./helpers.js";
 import {
   getWorkbookInfo,
@@ -100,6 +103,56 @@ describe("read_cell", () => {
     const p = await createTmpWorkbook();
     const result = await readCell(p, 1, "Z99");
     expect(result).toContain("(empty)");
+  });
+
+  // Regression: shared-formula slave cells must report their own translated
+  // formula, not the master cell's address. (GitHub issue #3)
+  it("reads the translated formula for shared-formula slave cells", async () => {
+    const p = tmpXlsxPath();
+    trackTmpFile(p);
+
+    // Build a fixture with a genuine shared formula group G2:I2.
+    // Master G2 = `$C2*D2`; slaves H2/I2 reference the master via `sharedFormula`
+    // and Excel slides the relative refs (D2 → E2 → F2).
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Split");
+    ws.getCell("C2").value = 770000;
+    ws.getCell("D2").value = 0.1;
+    ws.getCell("E2").value = 0.9;
+    ws.getCell("F2").value = 0;
+    ws.getCell("G2").value = {
+      formula: "$C2*D2",
+      result: 77000,
+      shareType: "shared",
+      ref: "G2:I2",
+    } as ExcelJS.CellFormulaValue;
+    ws.getCell("H2").value = {
+      sharedFormula: "G2",
+      result: 693000,
+    } as ExcelJS.CellSharedFormulaValue;
+    ws.getCell("I2").value = {
+      sharedFormula: "G2",
+      result: 0,
+    } as ExcelJS.CellSharedFormulaValue;
+    await wb.xlsx.writeFile(p);
+
+    const h2 = JSON.parse(
+      (await readCell(p, 1, "H2")).split("<json>")[1].split("</json>")[0],
+    );
+    expect(h2.type).toBe("formula");
+    expect(h2.value).toBe(693000);
+    expect(h2.formula).toBe("$C2*E2"); // not "G2"
+
+    const i2 = JSON.parse(
+      (await readCell(p, 1, "I2")).split("<json>")[1].split("</json>")[0],
+    );
+    expect(i2.formula).toBe("$C2*F2"); // not "G2"
+
+    // Master cell still reports its own formula.
+    const g2 = JSON.parse(
+      (await readCell(p, 1, "G2")).split("<json>")[1].split("</json>")[0],
+    );
+    expect(g2.formula).toBe("$C2*D2");
   });
 });
 
