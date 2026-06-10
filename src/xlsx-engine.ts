@@ -29,6 +29,7 @@ import {
   parseCellAddress,
   parseRange,
   validateRangeSize,
+  validateCellBounds,
   MAX_RANGE_CELLS,
   columnNumberToLetter,
   columnLetterToNumber,
@@ -49,6 +50,7 @@ import {
   renameWorksheet,
   deleteWorksheet,
   copyWorksheet,
+  validateSheetName,
 } from "./engine/sheets.js";
 import {
   insertRowsAt,
@@ -336,21 +338,25 @@ export async function createWorkbook(
   filePath: string,
   sheetName?: string,
 ): Promise<string> {
+  if (sheetName !== undefined) {
+    validateSheetName(sheetName);
+  }
   return withFileLock(filePath, async () => {
-    // 既存ファイルの上書き防止
-    try {
-      await fs.access(filePath);
-      throw new EngineError(
-        ErrorCode.INVALID_PARAMETER,
-        `File already exists: ${filePath}. Delete it first or use a different path.`,
-      );
-    } catch (e) {
-      if (e instanceof EngineError) throw e;
-      // ファイルが存在しない — 正常
-    }
     const wb = new ExcelJS.Workbook();
     wb.addWorksheet(sheetName ?? "Sheet1");
-    await wb.xlsx.writeFile(filePath);
+    const buffer = await wb.xlsx.writeBuffer();
+    try {
+      // flag "wx": 既存ファイルがあれば EEXIST — 上書き防止を OS レベルで保証する
+      await fs.writeFile(filePath, Buffer.from(buffer as ArrayBuffer), { flag: "wx" });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new EngineError(
+          ErrorCode.INVALID_PARAMETER,
+          `File already exists: ${filePath}. Delete it first or use a different path.`,
+        );
+      }
+      throw e;
+    }
     return `Created workbook: ${filePath}`;
   });
 }
@@ -403,13 +409,14 @@ export async function writeRow(
   values: Array<string | number | boolean | null>,
   startColumn?: string,
 ): Promise<string> {
+  const startColNum = startColumn ? columnLetterToNumber(startColumn) : 1;
+  validateCellBounds(row, startColNum + Math.max(values.length - 1, 0));
   return withFileLock(filePath, async () => {
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
-    const startCol = startColumn ? columnLetterToNumber(startColumn) : 1;
     const r = ws.getRow(row);
     for (let i = 0; i < values.length; i++) {
-      const c = r.getCell(startCol + i);
+      const c = r.getCell(startColNum + i);
       setCellValue(c, values[i]);
     }
     r.commit();
@@ -432,14 +439,19 @@ export async function writeRows(
       `Too many cells (${totalCells.toLocaleString()}). Maximum is ${MAX_RANGE_CELLS.toLocaleString()}.`,
     );
   }
+  const startColNum = startColumn ? columnLetterToNumber(startColumn) : 1;
+  const maxRowLen = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  validateCellBounds(
+    startRow + Math.max(rows.length - 1, 0),
+    startColNum + Math.max(maxRowLen - 1, 0),
+  );
   return withFileLock(filePath, async () => {
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
-    const startCol = startColumn ? columnLetterToNumber(startColumn) : 1;
     for (let ri = 0; ri < rows.length; ri++) {
       const r = ws.getRow(startRow + ri);
       for (let ci = 0; ci < rows[ri].length; ci++) {
-        const c = r.getCell(startCol + ci);
+        const c = r.getCell(startColNum + ci);
         setCellValue(c, rows[ri][ci]);
       }
       r.commit();
@@ -639,6 +651,7 @@ export async function setRowHeight(
   row: number,
   height: number,
 ): Promise<string> {
+  validateCellBounds(row, 1);
   return withFileLock(filePath, async () => {
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);
@@ -653,6 +666,9 @@ export async function setRowHeights(
   sheet: string | number,
   rows: Array<{ row: number; height: number }>,
 ): Promise<string> {
+  for (const entry of rows) {
+    validateCellBounds(entry.row, 1);
+  }
   return withFileLock(filePath, async () => {
     const handle = await openXlsx(filePath);
     const ws = resolveSheet(handle.workbook, sheet);

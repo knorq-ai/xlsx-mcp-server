@@ -11,6 +11,11 @@ import { ErrorCode, EngineError } from "./xlsx-io.js";
 // A1 notation helpers
 // ---------------------------------------------------------------------------
 
+/** Excel の最大行数 (1,048,576) */
+export const EXCEL_MAX_ROWS = 1_048_576;
+/** Excel の最大列数 (XFD = 16,384) */
+export const EXCEL_MAX_COLS = 16_384;
+
 /** A1 アドレスから { col, row } (1-based) を返す */
 export function parseCellAddress(addr: string): { col: number; row: number } {
   const m = addr.match(/^([A-Za-z]+)(\d+)$/);
@@ -20,6 +25,12 @@ export function parseCellAddress(addr: string): { col: number; row: number } {
   const row = parseInt(m[2], 10);
   if (row < 1) {
     throw new EngineError(ErrorCode.INVALID_RANGE, `Invalid row number in address: ${addr}`);
+  }
+  if (row > EXCEL_MAX_ROWS) {
+    throw new EngineError(
+      ErrorCode.ROW_OUT_OF_RANGE,
+      `Row ${row} exceeds Excel's maximum row ${EXCEL_MAX_ROWS.toLocaleString()} (address: ${addr})`,
+    );
   }
   return {
     col: columnLetterToNumber(m[1]),
@@ -36,7 +47,32 @@ export function columnLetterToNumber(letters: string): number {
   for (const ch of letters.toUpperCase()) {
     n = n * 26 + (ch.charCodeAt(0) - 64);
   }
+  if (n > EXCEL_MAX_COLS) {
+    throw new EngineError(
+      ErrorCode.COLUMN_OUT_OF_RANGE,
+      `Column "${letters.toUpperCase()}" exceeds Excel's maximum column XFD (${EXCEL_MAX_COLS.toLocaleString()} columns)`,
+    );
+  }
   return n;
+}
+
+/**
+ * 行番号と終端列が Excel の上限内に収まっているか検証する。
+ * write_row / write_rows のように A1 アドレスを経由しない書き込みで使用。
+ */
+export function validateCellBounds(row: number, endCol: number): void {
+  if (row > EXCEL_MAX_ROWS) {
+    throw new EngineError(
+      ErrorCode.ROW_OUT_OF_RANGE,
+      `Row ${row} exceeds Excel's maximum row ${EXCEL_MAX_ROWS.toLocaleString()}`,
+    );
+  }
+  if (endCol > EXCEL_MAX_COLS) {
+    throw new EngineError(
+      ErrorCode.COLUMN_OUT_OF_RANGE,
+      `Column ${endCol} (${columnNumberToLetter(endCol)}) exceeds Excel's maximum column XFD (${EXCEL_MAX_COLS.toLocaleString()} columns)`,
+    );
+  }
 }
 
 /** 1-based 列番号 → 文字列 (1=A, 26=Z, 27=AA, ...) */

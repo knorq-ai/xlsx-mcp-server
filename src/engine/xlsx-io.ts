@@ -3,6 +3,7 @@
  */
 
 import * as fs from "fs/promises";
+import * as path from "path";
 import ExcelJS from "exceljs";
 
 // ---------------------------------------------------------------------------
@@ -127,9 +128,26 @@ export async function openXlsx(filePath: string): Promise<XlsxHandle> {
 
 /**
  * Workbook をファイルに保存する。
+ *
+ * 同一ディレクトリの一時ファイルに書いてから rename するため、
+ * 書き込み途中のクラッシュで元のワークブックが破壊されることはない。
+ * fullCalcOnLoad を立てるのは、このサーバの編集が依存数式のキャッシュ済み
+ * 結果を無効化しても再計算できないため（Excel が開いたときに再計算させる）。
  */
 export async function saveXlsx(handle: XlsxHandle): Promise<void> {
-  await handle.workbook.xlsx.writeFile(handle.filePath);
+  handle.workbook.calcProperties.fullCalcOnLoad = true;
+  const dir = path.dirname(handle.filePath);
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(handle.filePath)}.tmp-${process.pid}-${Date.now()}`,
+  );
+  try {
+    await handle.workbook.xlsx.writeFile(tmpPath);
+    await fs.rename(tmpPath, handle.filePath);
+  } catch (e) {
+    await fs.unlink(tmpPath).catch(() => {});
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------------------
