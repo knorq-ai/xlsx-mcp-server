@@ -76,6 +76,7 @@ export const ErrorCode = {
   INVALID_PARAMETER: "INVALID_PARAMETER",
   MAX_CELLS_EXCEEDED: "MAX_CELLS_EXCEEDED",
   OUTSIDE_TEMPLATE_RANGE: "OUTSIDE_TEMPLATE_RANGE",
+  FILE_LOCKED: "FILE_LOCKED",
 } as const;
 
 export type ErrorCodeType = (typeof ErrorCode)[keyof typeof ErrorCode];
@@ -141,6 +142,15 @@ export async function openXlsx(filePath: string): Promise<XlsxHandle> {
  * fullCalcOnLoad を立てるのは、このサーバの編集が依存数式のキャッシュ済み
  * 結果を無効化しても再計算できないため（Excel が開いたときに再計算させる）。
  */
+/**
+ * XLSX_BACKUP_ON_WRITE=1 で、保存前に既存ファイルを `<file>.bak` へコピーする
+ * （直近 1 世代のみ。LLM がツールパラメータで無効化できないよう env で制御）。
+ */
+const BACKUP_ON_WRITE = (() => {
+  const v = (process.env.XLSX_BACKUP_ON_WRITE ?? "").toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+})();
+
 export async function saveXlsx(handle: XlsxHandle): Promise<void> {
   const ext = path.extname(handle.filePath).toLowerCase();
   if (ext === ".xlsm" || ext === ".xltm") {
@@ -150,6 +160,15 @@ export async function saveXlsx(handle: XlsxHandle): Promise<void> {
         `preserve VBA projects, so saving would silently destroy all macros. ` +
         `The file is readable; to edit it, copy it to .xlsx first.`,
     );
+  }
+  if (BACKUP_ON_WRITE) {
+    try {
+      await fs.copyFile(handle.filePath, handle.filePath + ".bak");
+    } catch (e) {
+      // 新規ファイル（コピー元なし）は無視。それ以外の失敗はバックアップ保証を
+      // 守るため保存自体を中断する。
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
   }
   handle.workbook.calcProperties.fullCalcOnLoad = true;
   const dir = path.dirname(handle.filePath);

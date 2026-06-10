@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "exceljs": "^4.4.0",
+    "exceljs": "4.4.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
